@@ -1,5 +1,7 @@
 #%% Imports -------------------------------------------------------------------
 
+import time
+import napari
 import numpy as np
 from skimage import io
 from pathlib import Path
@@ -8,24 +10,28 @@ from pathlib import Path
 from bdtools.models.annotate import Annotate
 from bdtools.models.unet import UNet
 
+# functions
+from functions import get_tif_metadata, get_tif_data
+
 #%% Inputs --------------------------------------------------------------------
 
 # Path
+data_path = Path(r"\\scopem-idadata.ethz.ch\BDehapiot\remote_Anderau\data")
 train_path = Path("data", "train")
 
 # Procedure
-annotate = 1
+annotate = 0
 train = 0
-predict = 0
+predict = 1
 
 # UNet build()
 backbone = "resnet18"
 activation = "sigmoid"
-downscale_factor = 1
+downscale_factor = 2
 
 # UNet train()
 preview = 0
-load_name = ""
+load_name0 = ""
 
 # preprocess
 patch_size = 512
@@ -34,7 +40,7 @@ img_norm = "none"
 msk_type = "edt"
 
 # augment
-iterations = 1000
+iterations = 3000
 invert_p = 0.0
 gamma_p = 0.5
 gblur_p = 0.5
@@ -49,6 +55,10 @@ validation_split = 0.2
 metric = "soft_dice_coef"
 learning_rate = 0.001
 patience = 20
+
+# predict
+idx = 3
+load_name1 = "model_512_edt_3000-1539_2"
 
 #%% Execute -------------------------------------------------------------------
 
@@ -76,7 +86,7 @@ if __name__ == "__main__":
 
         unet = UNet(
             save_name="",
-            load_name=load_name,
+            load_name=load_name0,
             root_path=Path.cwd(),
             backbone=backbone,
             classes=1,
@@ -114,4 +124,41 @@ if __name__ == "__main__":
             learning_rate=learning_rate,
             patience=patience,
             
+            )
+        
+#%% Predict -------------------------------------------------------------------
+
+    if predict:
+        
+        # Path
+        path = list(data_path.rglob("*.tif"))[idx]
+        
+        # Load data
+        t0 = time.time()
+        print("load : ", end="", flush=False)
+        metadata = get_tif_metadata(path)
+        C2 = (get_tif_data(path, slc="all", chn=1) // 16).astype("uint8")
+        t1 = time.time()
+        print(f"{t1 - t0:.3f}s")
+        
+        # Predict
+        unet = UNet(load_name=load_name1)
+        t0 = time.time()
+        print("predict : ", end="", flush=False)
+        prd = (unet.predict(C2, verbose=0) * 255).astype("uint8")
+        t1 = time.time()
+        print(f"{t1 - t0:.3f}s")
+        
+        # Display
+        viewer = napari.Viewer()
+        viewer.add_image(
+            C2,
+            scale=metadata["voxel_size"],
+            contrast_limits=[0, 255],
+            )
+        viewer.add_image(
+            prd, 
+            blending="additive", colormap="inferno", opacity=0.75,
+            scale=metadata["voxel_size"],
+            contrast_limits=[0, 255],
             )
