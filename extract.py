@@ -38,9 +38,8 @@ def extract():
             np.arange(shape[0]), size=nSlices, replace=False) 
         
         for z_idx in z_idxs:
-            # C1 = get_tif_data(path, slc=int(z_idx), chn=0)
-            C2 = get_tif_data(path, slc=int(z_idx), chn=1)
-            img = norm_pct(C2)               
+            img = get_tif_data(path, slc=int(z_idx), chn=1, rscale=True)
+            img = norm_pct(img)               
             img = (img * 255).astype("uint8")
             name = path.stem + f"_z{z_idx:03d}.tif"
             io.imsave(
@@ -53,3 +52,18 @@ def extract():
 if __name__ == "__main__":
     extract()
         
+#%% Rescale -------------------------------------------------------------------
+
+    # # skimage
+    # from skimage.transform import rescale
+
+    # rfi = 0.065 / 0.2
+    # paths = list(Path(Path.cwd(), "data", "train").rglob("*_mask.tif"))
+    
+    # for path in paths:
+    #     msk = io.imread(path)
+    #     msk = rescale(msk, (rfi, rfi), order=0)
+    #     io.imsave(
+    #         str(path).replace("_mask.tif", "_mask_rscale.tif"),
+    #         msk, check_contrast=False
+    #         )

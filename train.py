@@ -27,20 +27,20 @@ predict = 1
 # UNet build()
 backbone = "resnet18"
 activation = "sigmoid"
-downscale_factor = 2
+downscale_factor = 1
 
 # UNet train()
 preview = 0
 load_name0 = ""
 
 # preprocess
-patch_size = 512
-patch_overlap = 256
+patch_size = 256
+patch_overlap = 128
 img_norm = "none"
 msk_type = "edt"
 
 # augment
-iterations = 3000
+iterations = 4000
 invert_p = 0.0
 gamma_p = 0.5
 gblur_p = 0.5
@@ -53,12 +53,12 @@ epochs = 100
 batch_size = 8
 validation_split = 0.2
 metric = "soft_dice_coef"
-learning_rate = 0.001
+learning_rate = 0.0005
 patience = 20
 
 # predict
-idx = 3
-load_name1 = "model_512_edt_3000-1539_2"
+idx = 10
+load_name1 = "model_256_edt_4000-936_1"
 
 #%% Execute -------------------------------------------------------------------
 
@@ -137,7 +137,8 @@ if __name__ == "__main__":
         t0 = time.time()
         print("load : ", end="", flush=False)
         metadata = get_tif_metadata(path)
-        C2 = (get_tif_data(path, slc="all", chn=1) // 16).astype("uint8")
+        C2 = get_tif_data(path, slc="all", chn=1, rscale=True)
+        C2 = (C2 // 16).astype("uint8")
         t1 = time.time()
         print(f"{t1 - t0:.3f}s")
         
@@ -149,16 +150,100 @@ if __name__ == "__main__":
         t1 = time.time()
         print(f"{t1 - t0:.3f}s")
         
+#%%
+        
+        from skimage.filters import gaussian
+        from skimage.segmentation import clear_border
+        from skimage.morphology import (
+            remove_small_holes, remove_small_objects
+            )
+        
+        # Parameters
+        sigma = 0.5
+        thresh = 0.5
+        remove_border_objects = True
+
+        # Get msk
+        prd = gaussian(prd, sigma=sigma, preserve_range=True)
+        msk = prd > thresh
+        msk = remove_small_holes(msk, area_threshold=1e4)
+        msk = remove_small_objects(msk, min_size=1e4)
+        if remove_border_objects:
+            msk = clear_border(msk)
+        
         # Display
         viewer = napari.Viewer()
         viewer.add_image(
-            C2,
-            scale=metadata["voxel_size"],
-            contrast_limits=[0, 255],
+            C2, contrast_limits=[0, 255], visible=1,
+            gamma=0.5,
             )
         viewer.add_image(
-            prd, 
-            blending="additive", colormap="inferno", opacity=0.75,
-            scale=metadata["voxel_size"],
-            contrast_limits=[0, 255],
+            prd, contrast_limits=[0, 255], visible=0,
+            blending="additive", colormap="inferno", opacity=0.5,
+            )
+        viewer.add_image(
+            msk, contrast_limits=[0, 1], visible=1,
+            blending="additive", colormap="bop orange", opacity=0.5,
+            rendering="attenuated_mip", attenuation=0.5, 
+            )
+        
+
+#%%
+        # def nProcess(
+        #         path, 
+        #         df=1, 
+        #         sigma=2, 
+        #         thresh=0.2, 
+        #         h=0.15,
+        #         min_size=2048,
+        #         clear_nBorder=True,
+        #         ):
+        
+        #     # print(f"nProcess() - {path.stem} : ", end="", flush=True)
+        #     # t0 = time.time()
+        
+        #     # Load data
+        #     dir_path = data_path / path.stem
+        #     prd = io.imread(dir_path / (path.stem + f"_df{df}_predictions.tif"))
+            
+        #     # Initialize
+        #     sigma //= df
+        #     min_size //= df  
+            
+        #     # Segment (watershed)
+        #     prd = gaussian(prd, sigma=sigma)
+        #     nMask = prd > thresh
+        #     nMask = remove_small_objects(nMask, min_size=min_size)
+        #     if clear_nBorder:
+        #         nMask = clear_border(nMask)
+        #     nMarkers = h_maxima(prd, h)
+        #     nMarkers[nMask == 0] = 0
+        #     nMarkers = label(nMarkers)
+        #     nLabels = watershed(-prd, nMarkers, mask=nMask)
+                
+        #     # Save
+        #     io.imsave(
+        #         dir_path / (path.stem + f"_df{df}_nLabels.tif"), 
+        #         nLabels.astype("uint16"), check_contrast=False
+        #         )
+            
+        #     # t1 = time.time()
+        #     # print(f"{t1 - t0:.3f}s")
+
+#%%
+
+        # Display
+        viewer = napari.Viewer()
+        viewer.add_image(
+            C2, contrast_limits=[0, 255], visible=1,
+            gamma=0.5,
+            )
+        viewer.add_image(
+            prd, contrast_limits=[0, 255], visible=0,
+            blending="additive", colormap="inferno", opacity=0.5,
+            )
+        viewer.add_image(
+            msk, contrast_limits=[0, 1], visible=1,
+            blending="additive", colormap="bop orange", opacity=0.5,
+            rendering="attenuated_mip", attenuation=0.5, 
             )
