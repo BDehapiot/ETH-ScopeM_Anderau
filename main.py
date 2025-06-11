@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 from skimage import io
 from pathlib import Path
-from joblib import Parallel, delayed
+import matplotlib.pyplot as plt
+# from joblib import Parallel, delayed
 
 # bdtools
 from bdtools.models.unet import UNet
@@ -45,7 +46,7 @@ procedure = {
     "extract" : 0,
     "predict" : 0,
     "process" : 0,
-    "analyse" : 0,
+    "analyse" : 1,
     "display" : 0,
     
     }
@@ -72,9 +73,10 @@ parameters = {
         "dist"    : 3,
         
     # Analyse
-    
-    
-        
+    "data"  : "C1_mbn_int",
+    "tags0" : ["00min", "PEG34"],
+    "tags1" : ["30min", "PEG34"],
+
     # Display
     "C1_contrast_limits" : [0, 100],
     "C2_contrast_limits" : [0, 100],
@@ -313,7 +315,57 @@ class Main:
         #     )
         
 #%% Class(Main) : analyse() ---------------------------------------------------
+
+    def analyse(self):
         
+        def filter_data(df, tags):
+            if tags:
+                mask = df["name"].apply(lambda x: all(tag in x for tag in tags))
+            else:
+                mask = pd.Series(True, index=df.index)
+            return df.loc[mask]
+        
+        def plot(df0, df1):
+                        
+            # Data
+            avgs = [df0[data].mean(), df1[data].mean()]
+            errs = [df0[data].std() , df1[data].std() ]
+            x = np.arange(2) 
+            
+            # Plot
+            plt.bar(x, avgs, yerr=errs, capsize=20, color="lightgray")
+            
+            # Format
+            plt.title(data)
+            plt.xticks(x, [f"{'-'.join(tags0)}", f"{'-'.join(tags1)}"])
+            plt.ylabel("fluo. int. (A.U.)")
+            
+        # Fetch 
+        data = self.parameters["data"]
+        tags0 = self.parameters["tags0"]
+        tags1 = self.parameters["tags1"]
+            
+        # Load & merge results
+        results_m = []
+        for path in self.paths:
+            out_path = path.parent / path.stem
+            results_m.append(pd.read_csv(out_path / "results.csv"))
+        results_m = pd.concat(results_m, ignore_index=True)
+        
+        # Filters results
+        results_0 = filter_data(results_m, tags0)
+        results_1 = filter_data(results_m, tags1)
+        
+        # Plot
+        plot(results_0, results_1)
+        
+        # Save
+        title0 = f"results_0_{'-'.join(tags0)}.csv"
+        title1 = f"results_1_{'-'.join(tags0)}.csv"
+        results_m.to_csv(self.data_path / "results_m.csv", index=False)
+        results_0.to_csv(self.data_path / title0, index=False)
+        results_1.to_csv(self.data_path / title1, index=False)
+
 #%% Class(Display) ------------------------------------------------------------
 
 class Display:
@@ -618,45 +670,64 @@ if __name__ == "__main__":
     
 #%%
 
-    def filter_data(df, tags):
-        if tags:
-            mask = df["name"].apply(lambda x: all(tag in x for tag in tags))
-        else:
-            mask = pd.Series(True, index=df.index)
-        return df.loc[mask]
+    # # Imports 
+    
+    # import matplotlib.pyplot as plt
 
-    # -------------------------------------------------------------------------
+    # # Parameters
+    
+    # data = "C1_mbn_int"
+    # tags0 = ["00min", "PEG34"]
+    # tags1 = ["30min", "PEG34"]
+    
+    # # -------------------------------------------------------------------------
 
-    # Parameters
-    
-    cond0_tags = ["00min"]
-    cond1_tags = ["30min"]
-    
-    # -------------------------------------------------------------------------
+    # data_path = parameters["data_path"]
+    # paths = list(data_path.glob("*.tif"))
 
-    data_path = parameters["data_path"]
-    paths = list(data_path.glob("*.tif"))
+    # # -------------------------------------------------------------------------
+    
+    # results_m = []
+    # for path in paths:
+    #     out_path = path.parent / path.stem
+    #     results_m.append(pd.read_csv(out_path / "results.csv"))
+    # results_m = pd.concat(results_m, ignore_index=True)
+    
+    # # -------------------------------------------------------------------------
+    
+    # def filter_data(df, tags):
+    #     if tags:
+    #         mask = df["name"].apply(lambda x: all(tag in x for tag in tags))
+    #     else:
+    #         mask = pd.Series(True, index=df.index)
+    #     return df.loc[mask]
 
-    # -------------------------------------------------------------------------
+    # df0 = filter_data(results_m, tags0)
+    # df1 = filter_data(results_m, tags1)
     
-    results_m = []
-    for path in paths:
-        out_path = path.parent / path.stem
-        results_m.append(pd.read_csv(out_path / "results.csv"))
-    results_m = pd.concat(results_m, ignore_index=True)
+    # # -------------------------------------------------------------------------
+        
+    # # Data
+    # avgs = [df0[data].mean(), df1[data].mean()]
+    # sems = [df0[data].sem() , df1[data].sem() ]
+    # x = np.arange(2) 
     
-    # -------------------------------------------------------------------------
+    # # Plot
+    # plt.bar(
+    #     x, avgs, yerr=sems, 
+    #     color="lightgray", capsize=10
+    #     )
     
-    df0 = filter_data(results_m, cond0_tags)
-    df1 = filter_data(results_m, cond1_tags)
-    C1_mbn_int_n0 = np.array(df0["C1_mbn_int"] - df0["C1_cyt_int"])
-    C1_mbn_int_n1 = np.array(df1["C1_mbn_int"] - df1["C1_cyt_int"])
-    C2_mbn_int_n0 = np.array(df0["C2_mbn_int"] - df0["C2_cyt_int"])
-    C2_mbn_int_n1 = np.array(df1["C2_mbn_int"] - df1["C2_cyt_int"])
-    print(np.nanmean(C1_mbn_int_n0))
-    print(np.nanmean(C1_mbn_int_n1))
-    print(np.nanmean(C2_mbn_int_n0))
-    print(np.nanmean(C2_mbn_int_n1))
+    # # Format
+    # title = (
+    #     f"{data}\n"
+    #     f"tags0 : {tags0}\n"
+    #     f"tags1 : {tags1}\n"
+    #     )
+        
+    # plt.title(title)
+    # plt.xticks(x, ["cond0", "cond1"])
+    # plt.ylabel("fluo. int. (A.U.)")
     
 #%% 
     
