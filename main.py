@@ -17,11 +17,11 @@ from functions import get_tif_data
 # Skimage
 from skimage.measure import label
 from skimage.filters import gaussian
+from skimage.morphology import (
+    ball, binary_erosion, remove_small_holes,
+    )
 from skimage.segmentation import (
     clear_border, watershed, expand_labels, relabel_sequential
-    )
-from skimage.morphology import (
-    ball, binary_erosion, remove_small_holes, remove_small_objects
     )
 
 # Scipy
@@ -41,11 +41,13 @@ import napari
 
 # Procedure
 procedure = {
+    
     "extract" : 0,
     "predict" : 0,
-    "process" : 2,
+    "process" : 0,
     "analyse" : 0,
     "display" : 0,
+    
     }
 
 # Parameters
@@ -67,7 +69,11 @@ parameters = {
         "remove_border_objects" : False,
     
         # Get intensities
-        "dist"   : 3,
+        "dist"    : 3,
+        
+    # Analyse
+    
+    
         
     # Display
     "C1_contrast_limits" : [0, 100],
@@ -223,26 +229,33 @@ class Main:
                 t0 = time.time()
                 print("process : ", end="", flush=False)
                 
-                # Get labels
+                def remove_small_obj(lbl, min_size=1e4): # parameter
+                    vals, counts = np.unique(lbl.ravel(), return_counts=True)
+                    msk = (vals != 0) & (counts >= min_size)
+                    valid_vals = vals[msk]
+                    msk_img = np.isin(lbl, valid_vals)
+                    lbl_cleaned = np.where(msk_img, lbl, 0)
+                    return relabel_sequential(lbl_cleaned)[0]
                 
+                def get_obj_area(lbl):
+                    vals, counts = np.unique(lbl.ravel(), return_counts=True)
+                    return counts[1:]
+                                
+                def get_obj_int(lbl, img):
+                    labels = np.unique(lbl)[1:]
+                    return mean(img, labels=lbl, index=labels)
+                
+                # Get labels
                 msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
                 msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
-                msk0 = remove_small_objects(msk0, min_size=1e4) # parameter
                 if remove_border_objects:
                     msk0 = clear_border(msk0)
-                
                 msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
                 mrk = label(msk1)
                 lbl = watershed(-prd, mrk, mask=msk0).astype("uint8")
+                lbl = remove_small_obj(lbl)
                 
                 # Get intensities
-                                
-                def get_obj_int(lbl, img):
-                    labels = np.unique(lbl)
-                    if labels[0] == 0:
-                        labels = labels[1:]
-                    return mean(img, labels=lbl, index=labels)
-                
                 cyt_msk = binary_erosion(lbl > 0, footprint=ball(dist))
                 cyt_lbl = lbl.copy()
                 cyt_lbl[~cyt_msk] = 0
@@ -251,19 +264,15 @@ class Main:
                 mbn_lbl[cyt_msk] = 0
                 mbn_lbl = mbn_lbl.astype("uint8")
 
-                C1_cyt_ints = get_obj_int(cyt_lbl, C1)
-                C2_cyt_ints = get_obj_int(cyt_lbl, C2)
-                C1_mbn_ints = get_obj_int(mbn_lbl, C1)
-                C2_mbn_ints = get_obj_int(mbn_lbl, C2)
-                
                 # Get results
                 results = {
-                    "name"        : path.stem,
-                    "label"       : np.arange(1, np.max(lbl) + 1),
-                    "C1_cyt_ints" : C1_cyt_ints,
-                    "C2_cyt_ints" : C2_cyt_ints,
-                    "C1_mbn_ints" : C1_mbn_ints,
-                    "C2_mbn_ints" : C2_mbn_ints,
+                    "name"       : path.stem,
+                    "label"      : np.arange(1, np.max(lbl) + 1),
+                    "area"       : get_obj_area(lbl),
+                    "C1_cyt_int" : get_obj_int(cyt_lbl, C1),
+                    "C2_cyt_int" : get_obj_int(cyt_lbl, C2),
+                    "C1_mbn_int" : get_obj_int(mbn_lbl, C1),
+                    "C2_mbn_int" : get_obj_int(mbn_lbl, C2),
                     }
                 
                 t1 = time.time()
@@ -294,6 +303,7 @@ class Main:
         dist    = self.parameters["dist"]
         
         # Execute
+        
         for path in self.paths:
             _process(path)
             
@@ -301,7 +311,9 @@ class Main:
         #     delayed(_process)(path)
         #     for path in self.paths
         #     )
-            
+        
+#%% Class(Main) : analyse() ---------------------------------------------------
+        
 #%% Class(Display) ------------------------------------------------------------
 
 class Display:
@@ -328,13 +340,19 @@ class Display:
 #%% Class(Display) : function(s) ----------------------------------------------
 
     def load_data(self):  
+        
         path = self.paths[self.idx]
         out_path = path.parent / path.stem
+        
         self.C1  = io.imread(out_path / "C1.tif")
         self.C2  = io.imread(out_path / "C2.tif")
         self.C3  = io.imread(out_path / "C3.tif")
         self.prd = io.imread(out_path / "prd.tif")
         self.lbl = io.imread(out_path / "lbl.tif")
+        self.mbn_lbl = io.imread(out_path / "mbn_lbl.tif")
+        
+        self.mbn_out = self.mbn_lbl > 0
+        self.mbn_out = self.mbn_out ^ binary_erosion(self.mbn_out)
 
     def next_hstack(self):
         if self.idx < len(self.paths) - 1:
@@ -376,17 +394,48 @@ class Display:
         self.viewer.dims.ndisplay = 3
         self.viewer.grid.enabled = False
         
+    def show_chk(self):
+        for name in self.viewer.layers:
+            name = str(name)
+            if self.rad_C1.isChecked():
+                if name in ["C1", "mbn_out"]:
+                    self.viewer.layers[name].visible = 1
+                else:
+                    self.viewer.layers[name].visible = 0
+            if self.rad_C2.isChecked():
+                if name in ["C2", "mbn_out"]:
+                    self.viewer.layers[name].visible = 1
+                else:
+                    self.viewer.layers[name].visible = 0
+            if self.rad_C3.isChecked():
+                if name in ["C3", "mbn_out"]:
+                    self.viewer.layers[name].visible = 1
+                else:
+                    self.viewer.layers[name].visible = 0
+        self.viewer.dims.ndisplay = 2
+        self.viewer.grid.enabled = False
+        
     def hide_layers(self):
         if self.rad_prd.isChecked():
             self.viewer.layers["prd"].visible = 0
         if self.rad_lbl.isChecked():
             self.viewer.layers["lbl"].visible = 0
-        
+        if (self.rad_C1.isChecked() or 
+            self.rad_C2.isChecked() or 
+            self.rad_C3.isChecked() 
+            ):
+            self.viewer.layers["mbn_out"].visible = 0
+
     def show_layers(self):
         if self.rad_prd.isChecked():
             self.viewer.layers["prd"].visible = 1
         if self.rad_lbl.isChecked():
             self.viewer.layers["lbl"].visible = 1
+        if (self.rad_C1.isChecked() or 
+            self.rad_C2.isChecked() or 
+            self.rad_C3.isChecked() 
+            ):
+            self.viewer.layers["mbn_out"].visible = 1
             
 #%% Class(Display) : init_viewer() --------------------------------------------                
 
@@ -408,21 +457,37 @@ class Display:
         
         # Create "display" menu
         self.dsp_group_box = QGroupBox("Display")
-        dsp_group_layout = QHBoxLayout()
+        dsp_group_layout = QVBoxLayout()
+        row1_layout = QHBoxLayout()
         self.rad_htk = QRadioButton("hstack")
         self.rad_prd = QRadioButton("predictions")
         self.rad_lbl = QRadioButton("labels")
         self.rad_htk.setChecked(True)
-        dsp_group_layout.addWidget(self.rad_htk)
-        dsp_group_layout.addWidget(self.rad_prd)
-        dsp_group_layout.addWidget(self.rad_lbl)
+        row1_layout.addWidget(self.rad_htk)
+        row1_layout.addWidget(self.rad_prd)
+        row1_layout.addWidget(self.rad_lbl)
+        row2_layout = QHBoxLayout()
+        self.rad_C1 = QRadioButton("C1")
+        self.rad_C2 = QRadioButton("C2")
+        self.rad_C3 = QRadioButton("C3")
+        row2_layout.addWidget(self.rad_C1)
+        row2_layout.addWidget(self.rad_C2)
+        row2_layout.addWidget(self.rad_C3)
+        dsp_group_layout.addLayout(row1_layout)
+        dsp_group_layout.addLayout(row2_layout)
         self.dsp_group_box.setLayout(dsp_group_layout)
         self.rad_htk.toggled.connect(
             lambda checked: self.show_htk() if checked else None)
         self.rad_prd.toggled.connect(
             lambda checked: self.show_prd() if checked else None)
         self.rad_lbl.toggled.connect(
-            lambda checked: self.show_lbl() if checked else None)                
+            lambda checked: self.show_lbl() if checked else None)   
+        self.rad_C1.toggled.connect(
+            lambda checked: self.show_chk() if checked else None)
+        self.rad_C2.toggled.connect(
+            lambda checked: self.show_chk() if checked else None)
+        self.rad_C3.toggled.connect(
+            lambda checked: self.show_chk() if checked else None)
         
         # Create texts
         self.info = QLabel()
@@ -465,6 +530,13 @@ class Display:
     def init_layers(self):  
         
         self.load_data()
+        
+        # out
+        self.viewer.add_image(
+            self.mbn_out, name="mbn_out", visible=0,
+            colormap="gray", blending="additive", 
+            gamma=1.0, opacity=0.25,
+            )
         
         # lbl
         self.viewer.add_labels(
@@ -520,7 +592,10 @@ class Display:
     def update(self):
         
         self.load_data()
-       
+        
+        # out
+        self.viewer.layers["mbn_out"].data = self.mbn_out 
+        
         # lbl
         self.viewer.layers["lbl"].data = self.lbl 
        
@@ -541,6 +616,48 @@ if __name__ == "__main__":
     main = Main()
     display = Display()
     
+#%%
+
+    def filter_data(df, tags):
+        if tags:
+            mask = df["name"].apply(lambda x: all(tag in x for tag in tags))
+        else:
+            mask = pd.Series(True, index=df.index)
+        return df.loc[mask]
+
+    # -------------------------------------------------------------------------
+
+    # Parameters
+    
+    cond0_tags = ["00min"]
+    cond1_tags = ["30min"]
+    
+    # -------------------------------------------------------------------------
+
+    data_path = parameters["data_path"]
+    paths = list(data_path.glob("*.tif"))
+
+    # -------------------------------------------------------------------------
+    
+    results_m = []
+    for path in paths:
+        out_path = path.parent / path.stem
+        results_m.append(pd.read_csv(out_path / "results.csv"))
+    results_m = pd.concat(results_m, ignore_index=True)
+    
+    # -------------------------------------------------------------------------
+    
+    df0 = filter_data(results_m, cond0_tags)
+    df1 = filter_data(results_m, cond1_tags)
+    C1_mbn_int_n0 = np.array(df0["C1_mbn_int"] - df0["C1_cyt_int"])
+    C1_mbn_int_n1 = np.array(df1["C1_mbn_int"] - df1["C1_cyt_int"])
+    C2_mbn_int_n0 = np.array(df0["C2_mbn_int"] - df0["C2_cyt_int"])
+    C2_mbn_int_n1 = np.array(df1["C2_mbn_int"] - df1["C2_cyt_int"])
+    print(np.nanmean(C1_mbn_int_n0))
+    print(np.nanmean(C1_mbn_int_n1))
+    print(np.nanmean(C2_mbn_int_n0))
+    print(np.nanmean(C2_mbn_int_n1))
+    
 #%% 
     
     # htk_idx = 21
@@ -560,66 +677,76 @@ if __name__ == "__main__":
     # thresh0 = parameters["thresh0"] * 255
     # thresh1 = parameters["thresh1"] * 255
     # remove_border_objects = parameters["remove_border_objects"]
+    # dist = parameters["dist"]
 
     # # -------------------------------------------------------------------------
 
-    # t0 = time.time()
-    # print("run : ", end="", flush=False)
+    # def remove_small_obj(lbl, min_size=1e4):
+    #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
+    #     msk = (vals != 0) & (counts >= min_size)
+    #     valid_vals = vals[msk]
+    #     msk_img = np.isin(lbl, valid_vals)
+    #     lbl_cleaned = np.where(msk_img, lbl, 0)
+    #     return relabel_sequential(lbl_cleaned)[0]
+    
+    # def get_obj_area(lbl):
+    #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
+    #     return counts[1:]
+    
+    # def get_obj_int(lbl, img):
+    #     labels = np.unique(lbl)[1:]
+    #     return mean(img, labels=lbl, index=labels)   
 
+    # t0 = time.time()
+    # print("process : ", end="", flush=False)
+
+    # # Get labels
     # msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
     # msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
-    # msk0 = remove_small_objects(msk0, min_size=1e4) # parameter
     # if remove_border_objects:
     #     msk0 = clear_border(msk0)
     # msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
     # mrk = label(msk1)
     # lbl = watershed(-prd, mrk, mask=msk0)
-    
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
-    
-    # # -------------------------------------------------------------------------
-    
-    # from scipy.ndimage import mean
-    # from skimage.measure import regionprops
-    # from skimage.segmentation import expand_labels
-    # from skimage.morphology import ball, binary_erosion
-    
-    # t0 = time.time()
-    # print("run : ", end="", flush=False)
-
-    # dist = 3
-
+    # lbl = remove_small_obj(lbl)
+ 
+    # # Get intensities
     # cyt_msk = binary_erosion(lbl > 0, footprint=ball(dist))
     # mbn_lbl = expand_labels(lbl, distance=dist)
     # mbn_lbl[cyt_msk] = 0
     # cyt_lbl = lbl.copy()
     # cyt_lbl[~cyt_msk] = 0
     
-    # def get_obj_int(lbl, img):
-    #     labels = np.unique(lbl)
-    #     if labels[0] == 0:
-    #         labels = labels[1:]
-    #     return mean(img, labels=lbl, index=labels)
-
-    # C1_cyt_ints = get_obj_int(cyt_lbl, C1)
-    # C2_cyt_ints = get_obj_int(cyt_lbl, C2)
-    # C1_mbn_ints = get_obj_int(mbn_lbl, C1)
-    # C2_mbn_ints = get_obj_int(mbn_lbl, C2)
-    
-    # C1_mbn_ints /= C1_cyt_ints
-    # C2_mbn_ints /= C2_cyt_ints
+    # # Get results
+    # results = {
+    #     "name"       : path.stem,
+    #     "label"      : np.arange(1, np.max(lbl) + 1),
+    #     "area"       : get_obj_area(lbl),
+    #     "C1_cyt_int" : get_obj_int(cyt_lbl, C1),
+    #     "C2_cyt_int" : get_obj_int(cyt_lbl, C2),
+    #     "C1_mbn_int" : get_obj_int(mbn_lbl, C1),
+    #     "C2_mbn_int" : get_obj_int(mbn_lbl, C2),
+    #     }
     
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
+        
+    # # -------------------------------------------------------------------------
     
-    # import matplotlib.pyplot as plt
-    # plt.scatter(C1_mbn_ints, C2_mbn_ints)
+    # t0 = time.time()
+    # print("run : ", end="", flush=False)
+    
+    # mbn_out = mbn_lbl > 0
+    # mbn_out = mbn_out ^ binary_erosion(mbn_out)
+    
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
     
     # # -------------------------------------------------------------------------
     
     # # Display
     # viewer = napari.Viewer()
+    
     # viewer.add_image(
     #     C2, name="C2", visible=1,
     #     colormap="gray", 
@@ -632,11 +759,13 @@ if __name__ == "__main__":
     #     gamma=1.0, opacity=1.00,
     #     contrast_limits = parameters["C1_contrast_limits"],
     #     )
+    
     # viewer.add_image(
     #     prd, name="prd", visible=0,
     #     colormap="inferno", blending="additive",  
     #     gamma=1.0, opacity=0.25,
     #     )
+    
     # viewer.add_image(
     #     msk0, name="msk0", visible=0,
     #     colormap="bop orange", blending="additive",  
@@ -651,19 +780,23 @@ if __name__ == "__main__":
     #     )
         
     # viewer.add_labels(
-    #     cyt_lbl, name="cyt_lbl", visible=1,
+    #     cyt_lbl, name="cyt_lbl", visible=0,
     #     blending="additive", 
     #     opacity=0.50,
     #     )
     # viewer.add_labels(
-    #     mbn_lbl, name="mbn_lbl", visible=1,
+    #     mbn_lbl, name="mbn_lbl", visible=0,
     #     blending="additive", 
     #     opacity=0.50,
     #     )
-    
     # viewer.add_labels(
     #     lbl, name="lbl", visible=0,
     #     blending="additive", 
     #     opacity=0.50,
-    #     )
+    #     )   
     
+    # viewer.add_image(
+    #     mbn_out, name="mbn_out", visible=1,
+    #     colormap="grey", blending="additive",  
+    #     gamma=1.0, opacity=1.00,
+    #     )
