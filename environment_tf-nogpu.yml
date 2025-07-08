@@ -20,6 +20,7 @@ dependencies:
   - napari
   - pyqt
   - spyder
+  - nd2
   # conda_tf-nogpu
   - pip:
     # pip-core

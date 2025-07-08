@@ -1,7 +1,0 @@
-{
-    "img_norm": "none",
-    "msk_type": "edt",
-    "patch_size": 256,
-    "patch_overlap": 128,
-    "downscaling_factor": 1
-}
