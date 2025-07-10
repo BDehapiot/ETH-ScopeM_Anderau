@@ -21,9 +21,9 @@ data_path = Path("D:\local_Anderau\data")
 train_path = Path("data", "train")
 
 # Procedure
-annotate = 0
+annotate = 1
 train = 0
-predict = 1
+predict = 0
 
 # UNet build()
 backbone = "resnet18"
