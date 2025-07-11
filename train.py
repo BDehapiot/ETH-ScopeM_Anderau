@@ -21,9 +21,9 @@ data_path = Path("D:\local_Anderau\data")
 train_path = Path("data", "train")
 
 # Procedure
-annotate = 1
+annotate = 0
 train = 0
-predict = 0
+predict = 1
 
 # UNet build()
 backbone = "resnet18"
@@ -32,7 +32,7 @@ downscale_factor = 1
 
 # UNet train()
 preview = 0
-load_name0 = ""
+load_name0 = "model_256_edt_4000-648_1"
 
 # preprocess
 patch_size = 256
@@ -54,12 +54,12 @@ epochs = 100
 batch_size = 8
 validation_split = 0.2
 metric = "soft_dice_coef"
-learning_rate = 0.0005
+learning_rate = 0.001
 patience = 20
 
 # predict
 idx = 10
-load_name1 = "model_256_edt_4000-468_1"
+load_name1 = "model_256_edt_4000-648_1"
 
 #%% Execute -------------------------------------------------------------------
 

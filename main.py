@@ -1,6 +1,7 @@
 #%% Imports -------------------------------------------------------------------
 
 import time
+import pickle
 import shutil
 import numpy as np
 import pandas as pd
@@ -11,22 +12,25 @@ import matplotlib.pyplot as plt
 
 # bdtools
 from bdtools.models.unet import UNet
+from bdtools import nan_filt, nan_replace
 
 # functions
-from functions import get_tif_data
+from functions import import_nd2
 
 # Skimage
 from skimage.measure import label
 from skimage.filters import gaussian
+from skimage.filters.rank import median
+from skimage.transform import resize, rescale
 from skimage.morphology import (
-    ball, binary_erosion, remove_small_holes,
+    disk, ball, binary_erosion, remove_small_holes, remove_small_objects
     )
 from skimage.segmentation import (
-    clear_border, watershed, expand_labels, relabel_sequential
+    clear_border, watershed, find_boundaries, expand_labels, relabel_sequential
     )
 
 # Scipy
-from scipy.ndimage import mean
+from scipy.ndimage import mean, sum_labels
 
 # Qt
 from qtpy.QtGui import QFont
@@ -46,8 +50,8 @@ procedure = {
     "extract" : 0,
     "predict" : 0,
     "process" : 0,
-    "analyse" : 0,
-    "display" : 1,
+    "analyse" : 1,
+    "display" : 0,
     
     }
 
@@ -56,24 +60,29 @@ parameters = {
     
     # Paths
     "data_path" :
-        Path(r"\\scopem-idadata.ethz.ch\BDehapiot\remote_Anderau\data"),
+        Path("D:\local_Anderau\data"),
+    # "data_path" :
+    #     Path(r"\\scopem-idadata.ethz.ch\BDehapiot\remote_Anderau\data"),
     "model_name" :
-        "model_256_edt_4000-936_1",
+        "model_256_edt_4000-648_1",
         
     # Process
     
         # Get labels
-        "sigma0"  : 0.5,
-        "sigma1"  : 2,
-        "thresh0" : 0.05,
-        "thresh1" : 0.5,
+        "rf"        : 0.5,   
+        "bsub"      : True,
+        "sigma0"    : 0.5,
+        "sigma1"    : 2,
+        "thresh0"   : 0.01,
+        "thresh1"   : 0.5,
         "remove_border_objects" : False,
+        "min_sdist" : 5,
     
         # Get intensities
-        "dist"    : 3,
+        "mbn_width" : 3,
         
     # Analyse
-    "data"  : "C1_mbn_int",
+    "data"  : "C1_mbn_mean_int",
     "tags0" : ["00min", "PEG12"],
     "tags1" : ["30min", "PEG12"],
 
@@ -101,7 +110,7 @@ class Main:
         self.model_name = parameters["model_name"]
         
         # Initialize
-        self.paths = list(self.data_path.glob("*.tif"))
+        self.paths = list(self.data_path.glob("*.nd2"))
                 
         # Run
         if self.procedure["extract"]:
@@ -138,21 +147,18 @@ class Main:
             t0 = time.time()
             print(f"{path.stem}")
             print("load : ", end="", flush=False)
-            C1 = get_tif_data(path, slc="all", chn=0, rscale=True)
-            C2 = get_tif_data(path, slc="all", chn=1, rscale=True)
-            C3 = get_tif_data(path, slc="all", chn=2, rscale=True)
-            C1 = (C1 // 16).astype("uint8")
-            C2 = (C2 // 16).astype("uint8")
-            C3 = (C3 // 16).astype("uint8")
+            arr, metadata = import_nd2(path, z="all", c="all", rscale=True)
             t1 = time.time()
             print(f"{t1 - t0:.3f}s")
             
             # Save
             t0 = time.time()
             print("save : ", end="", flush=False)
-            io.imsave(out_path / "C1.tif", C1, check_contrast=False)
-            io.imsave(out_path / "C2.tif", C2, check_contrast=False)
-            io.imsave(out_path / "C3.tif", C3, check_contrast=False)
+            io.imsave(out_path / "C1.tif", arr[:, 0, ...], check_contrast=False)
+            io.imsave(out_path / "C2.tif", arr[:, 1, ...], check_contrast=False)
+            io.imsave(out_path / "C3.tif", arr[:, 2, ...], check_contrast=False)
+            with open(str(out_path / "metadata.pkl"), "wb") as f:
+                pickle.dump(metadata, f)
             t1 = time.time()
             print(f"{t1 - t0:.3f}s")
             
@@ -206,6 +212,47 @@ class Main:
 
     def process(self):
         
+        def remove_small_obj(lbl, min_size=1e4): # parameter
+            vals, counts = np.unique(lbl.ravel(), return_counts=True)
+            msk = (vals != 0) & (counts >= min_size)
+            valid_vals = vals[msk]
+            msk_img = np.isin(lbl, valid_vals)
+            lbl_cleaned = np.where(msk_img, lbl, 0)
+            return relabel_sequential(lbl_cleaned)[0]
+        
+        def get_synaptic_plane_dist(C3, med_size=21):
+            msk = C3 > 128 # parameter
+            msk = remove_small_objects(msk, min_size=1e5) # parameter
+            z_pos = msk.shape[0] - np.argmax(msk[::-1, :, :], axis=0)
+            z_pos = median(z_pos.astype("uint8"), footprint=disk(med_size))
+            sdist = np.arange(msk.shape[0])[:, np.newaxis, np.newaxis]
+            sdist = np.broadcast_to(sdist, msk.shape)
+            sdist = sdist - z_pos
+            return sdist
+        
+        def subtract_background(Cx, lbl, mbn_lbl, kernel_size=9):
+            msk = np.maximum(lbl, mbn_lbl) > 0
+            msk = np.max(msk, axis=0) == 0
+            bgrd = Cx.copy().astype(float)
+            bgrd *= msk
+            bgrd[bgrd == 0] = np.nan
+            bgrd = nan_filt(bgrd, kernel_size=kernel_size)
+            bgrd = nan_replace(bgrd, kernel_size=kernel_size)
+            bsub = Cx.copy().astype(float) - bgrd
+            return bsub
+        
+        def get_obj_volume(lbl):
+            vals, counts = np.unique(lbl.ravel(), return_counts=True)
+            return counts[1:]
+                        
+        def get_obj_mean_int(lbl, img):
+            labels = np.unique(lbl)[1:]
+            return mean(img, labels=lbl, index=labels) 
+        
+        def get_obj_sum_int(lbl, img):
+            labels = np.unique(lbl)[1:]
+            return sum_labels(img, labels=lbl, index=labels)
+        
         def _process(path):
             
             out_path = path.parent / path.stem
@@ -218,71 +265,94 @@ class Main:
             else:
 
                 # Load
-                t0 = time.time()
                 print(f"{path.stem}")
-                print("load : ", end="", flush=False)
+                
+                t0 = time.time()
+                print("load    : ", end="", flush=False)
                 C1 = io.imread(out_path / "C1.tif")
                 C2 = io.imread(out_path / "C2.tif")
+                C3 = io.imread(out_path / "C3.tif")
                 prd = io.imread(out_path / "prd.tif")
                 t1 = time.time()
                 print(f"{t1 - t0:.3f}s")
                 
-                # Process
                 t0 = time.time()
                 print("process : ", end="", flush=False)
-                
-                def remove_small_obj(lbl, min_size=1e4): # parameter
-                    vals, counts = np.unique(lbl.ravel(), return_counts=True)
-                    msk = (vals != 0) & (counts >= min_size)
-                    valid_vals = vals[msk]
-                    msk_img = np.isin(lbl, valid_vals)
-                    lbl_cleaned = np.where(msk_img, lbl, 0)
-                    return relabel_sequential(lbl_cleaned)[0]
-                
-                def get_obj_area(lbl):
-                    vals, counts = np.unique(lbl.ravel(), return_counts=True)
-                    return counts[1:]
-                                
-                def get_obj_int(lbl, img):
-                    labels = np.unique(lbl)[1:]
-                    return mean(img, labels=lbl, index=labels)
-                
+            
+                # Downscale (optional)
+                if rf < 1:
+                    C1_rscale = rescale(C1, rf, order=0, preserve_range=True)
+                    C2_rscale = rescale(C2, rf, order=0, preserve_range=True)
+                    C3_rscale = rescale(C3, rf, order=0, preserve_range=True)
+                    prd_rscale = rescale(prd, rf, order=0, preserve_range=True)
+                       
                 # Get labels
-                msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
-                msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
+                msk0 = gaussian(
+                    prd_rscale, sigma=sigma0, preserve_range=True) > thresh0
+                msk0 = remove_small_holes(msk0, area_threshold=1e4 * rf**3) # parameter
                 if remove_border_objects:
                     msk0 = clear_border(msk0)
-                msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
+                msk1 = gaussian(
+                    prd_rscale, sigma=sigma1, preserve_range=True) > thresh1
                 mrk = label(msk1)
-                lbl = watershed(-prd, mrk, mask=msk0).astype("uint8")
-                lbl = remove_small_obj(lbl)
-                
+                lbl = watershed(-prd_rscale, mrk, mask=msk0).astype("uint8")
+                sdist = get_synaptic_plane_dist(C3_rscale, med_size=21 * rf) # parameter
+                lbl[sdist < min_sdist * rf] = 0
+                lbl[find_boundaries(lbl)] = 0
+                lbl = remove_small_obj(lbl, min_size=1e4 * rf**3)
+
                 # Get intensities
-                cyt_msk = binary_erosion(lbl > 0, footprint=ball(dist))
+                cyt_msk = binary_erosion(
+                    lbl > 0, footprint=ball(max(3, mbn_width * rf)))
                 cyt_lbl = lbl.copy()
                 cyt_lbl[~cyt_msk] = 0
                 cyt_lbl = cyt_lbl.astype("uint8")
-                mbn_lbl = expand_labels(lbl, distance=dist)
+                mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width * rf))
                 mbn_lbl[cyt_msk] = 0
                 mbn_lbl = mbn_lbl.astype("uint8")
+                
+                # Background subtraction (optional)
+                if bsub:
+                    C1_rscale = subtract_background(
+                        C1_rscale, lbl, mbn_lbl, kernel_size=9)
+                    C2_rscale = subtract_background(
+                        C2_rscale, lbl, mbn_lbl, kernel_size=9)
 
                 # Get results
                 results = {
-                    "name"       : path.stem,
-                    "label"      : np.arange(1, np.max(lbl) + 1),
-                    "area"       : get_obj_area(lbl),
-                    "C1_cyt_int" : get_obj_int(cyt_lbl, C1),
-                    "C2_cyt_int" : get_obj_int(cyt_lbl, C2),
-                    "C1_mbn_int" : get_obj_int(mbn_lbl, C1),
-                    "C2_mbn_int" : get_obj_int(mbn_lbl, C2),
+                    "name"            : path.stem,
+                    "label"           : np.arange(1, np.max(lbl) + 1),
+                    "volume"          : get_obj_volume(lbl) / rf**3,
+                    "C1_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C1_rscale),
+                    "C2_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C2_rscale),
+                    "C1_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C1_rscale),
+                    "C2_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C2_rscale),
+                    "C1_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C1_rscale),
+                    "C2_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C2_rscale),
+                    "C1_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C1_rscale),
+                    "C2_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C2_rscale),
+                    "C1_all_mean_int" : get_obj_mean_int(
+                        np.maximum(lbl, mbn_lbl), C1_rscale),
+                    "C2_all_mean_int" : get_obj_mean_int(
+                        np.maximum(lbl, mbn_lbl), C2_rscale),
+                    "C1_all_sum_int"  : get_obj_sum_int(
+                        np.maximum(lbl, mbn_lbl), C1_rscale),
+                    "C2_all_sum_int"  : get_obj_sum_int(
+                        np.maximum(lbl, mbn_lbl), C2_rscale),
                     }
+
+                # Upscale (if downscale)
+                if rf < 1:
+                    lbl = resize(lbl, C1.shape, order=0)
+                    cyt_lbl = resize(cyt_lbl, C1.shape, order=0)
+                    mbn_lbl = resize(mbn_lbl, C1.shape, order=0)
                 
                 t1 = time.time()
                 print(f"{t1 - t0:.3f}s")
                 
                 # Save
                 t0 = time.time()
-                print("save : ", end="", flush=False)
+                print("save    : ", end="", flush=False)
                 
                 # csv
                 results = pd.DataFrame(results)   
@@ -297,12 +367,15 @@ class Main:
                 print(f"{t1 - t0:.3f}s")
                 
         # Fetch 
-        sigma0  = self.parameters["sigma0"]
-        sigma1  = self.parameters["sigma1"]
-        thresh0 = self.parameters["thresh0"] * 255
-        thresh1 = self.parameters["thresh1"] * 255
+        rf       = self.parameters["rf"]
+        sigma0   = self.parameters["sigma0"]
+        sigma1   = self.parameters["sigma1"]
+        thresh0  = self.parameters["thresh0"] * 255
+        thresh1  = self.parameters["thresh1"] * 255
         remove_border_objects = self.parameters["remove_border_objects"]
-        dist    = self.parameters["dist"]
+        min_sdist = self.parameters["min_sdist"]
+        mbn_width = self.parameters["mbn_width"]
+        bsub = self.parameters["bsub"]
         
         # Execute
         
@@ -383,7 +456,7 @@ class Display:
         
         # Initialize
         self.idx = 0
-        self.paths = list(self.data_path.glob("*.tif"))
+        self.paths = list(self.data_path.glob("*.nd2"))
         
         # Run
         if self.procedure["display"]:
@@ -668,7 +741,7 @@ if __name__ == "__main__":
     main = Main()
     display = Display()
     
-#%%
+#%% Plot ----------------------------------------------------------------------
 
     # # Imports 
     
@@ -731,13 +804,15 @@ if __name__ == "__main__":
     
 #%% 
     
-    # htk_idx = 21
+    # idx = 8
+    # rf = 0.5
     # data_path = parameters["data_path"]
-    # paths = list(data_path.glob("*.tif"))
-    # path = paths[htk_idx]
+    # paths = list(data_path.glob("*.nd2"))
+    # path = paths[idx]
     # out_path = path.parent / path.stem
     # C1 = io.imread(out_path / "C1.tif")
     # C2 = io.imread(out_path / "C2.tif")
+    # C3 = io.imread(out_path / "C3.tif")
     # prd = io.imread(out_path / "prd.tif")
     
     # # -------------------------------------------------------------------------
@@ -748,11 +823,12 @@ if __name__ == "__main__":
     # thresh0 = parameters["thresh0"] * 255
     # thresh1 = parameters["thresh1"] * 255
     # remove_border_objects = parameters["remove_border_objects"]
-    # dist = parameters["dist"]
+    # min_sdist = parameters["min_sdist"] = 5
+    # mbn_width = parameters["mbn_width"]
 
     # # -------------------------------------------------------------------------
 
-    # def remove_small_obj(lbl, min_size=1e4):
+    # def remove_small_obj(lbl, min_size=1e4): # parameter
     #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
     #     msk = (vals != 0) & (counts >= min_size)
     #     valid_vals = vals[msk]
@@ -760,55 +836,128 @@ if __name__ == "__main__":
     #     lbl_cleaned = np.where(msk_img, lbl, 0)
     #     return relabel_sequential(lbl_cleaned)[0]
     
-    # def get_obj_area(lbl):
+    # def get_synaptic_plane_dist(C3, med_size=21):
+    #     msk = C3 > 128 # parameter
+    #     msk = remove_small_objects(msk, min_size=1e5) # parameter
+    #     z_pos = msk.shape[0] - np.argmax(msk[::-1, :, :], axis=0)
+    #     z_pos = median(z_pos.astype("uint8"), footprint=disk(med_size))
+    #     sdist = np.arange(msk.shape[0])[:, np.newaxis, np.newaxis]
+    #     sdist = np.broadcast_to(sdist, msk.shape)
+    #     sdist = sdist - z_pos
+    #     return sdist
+    
+    # def subtract_background(Cx, lbl, mbn_lbl, kernel_size=9):
+    #     msk = np.maximum(lbl, mbn_lbl) > 0
+    #     msk = np.max(msk, axis=0) == 0
+    #     bgrd = Cx.copy().astype(float)
+    #     bgrd *= msk
+    #     bgrd[bgrd == 0] = np.nan
+    #     bgrd = nan_filt(bgrd, kernel_size=kernel_size)
+    #     bgrd = nan_replace(bgrd, kernel_size=kernel_size)
+    #     bsub = Cx.copy().astype(float) - bgrd
+    #     return bsub
+    
+    # def get_obj_volume(lbl):
     #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
     #     return counts[1:]
-    
-    # def get_obj_int(lbl, img):
+                    
+    # def get_obj_mean_int(lbl, img):
     #     labels = np.unique(lbl)[1:]
-    #     return mean(img, labels=lbl, index=labels)   
+    #     return mean(img, labels=lbl, index=labels) 
+    
+    # def get_obj_sum_int(lbl, img):
+    #     labels = np.unique(lbl)[1:]
+    #     return sum_labels(img, labels=lbl, index=labels)
+
+    # # -------------------------------------------------------------------------
+    
+    # t0 = time.time()
+    # print("downscale : ", end="", flush=False)
+
+    # # Downscale (if needed)
+    # if rf < 1:
+    #     C1_rscale = rescale(C1, rf, order=0, preserve_range=True)
+    #     C2_rscale = rescale(C2, rf, order=0, preserve_range=True)
+    #     C3_rscale = rescale(C3, rf, order=0, preserve_range=True)
+    #     prd_rscale = rescale(prd, rf, order=0, preserve_range=True)
+
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
 
     # t0 = time.time()
-    # print("process : ", end="", flush=False)
+    # print("get labels : ", end="", flush=False)
 
     # # Get labels
-    # msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
-    # msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
+    # msk0 = gaussian(prd_rscale, sigma=sigma0, preserve_range=True) > thresh0
+    # msk0 = remove_small_holes(msk0, area_threshold=1e4 * rf**3) # parameter
     # if remove_border_objects:
     #     msk0 = clear_border(msk0)
-    # msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
+    # msk1 = gaussian(prd_rscale, sigma=sigma1, preserve_range=True) > thresh1
     # mrk = label(msk1)
-    # lbl = watershed(-prd, mrk, mask=msk0)
-    # lbl = remove_small_obj(lbl)
- 
+    # lbl = watershed(-prd_rscale, mrk, mask=msk0).astype("uint8")
+    # sdist = get_synaptic_plane_dist(C3_rscale, med_size=21 * rf) # parameter
+    # lbl[sdist < min_sdist * rf] = 0
+    # lbl[find_boundaries(lbl)] = 0
+    # lbl = remove_small_obj(lbl, min_size=1e4 * rf**3)
+    
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
+     
+    # t0 = time.time()
+    # print("process labels : ", end="", flush=False)
+    
     # # Get intensities
-    # cyt_msk = binary_erosion(lbl > 0, footprint=ball(dist))
-    # mbn_lbl = expand_labels(lbl, distance=dist)
-    # mbn_lbl[cyt_msk] = 0
+    # cyt_msk = binary_erosion(lbl > 0, footprint=ball(max(3, mbn_width * rf)))
     # cyt_lbl = lbl.copy()
     # cyt_lbl[~cyt_msk] = 0
+    # cyt_lbl = cyt_lbl.astype("uint8")
+    # mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width * rf))
+    # mbn_lbl[cyt_msk] = 0
+    # mbn_lbl = mbn_lbl.astype("uint8")
+        
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
     
+    # t0 = time.time()
+    # print("background sub. : ", end="", flush=False)
+    
+    # C1_rscale = subtract_background(
+    #     C1_rscale, lbl, mbn_lbl, kernel_size=9)
+    # C2_rscale = subtract_background(
+    #     C2_rscale, lbl, mbn_lbl, kernel_size=9)
+    
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
+
+    # t0 = time.time()
+    # print("measure : ", end="", flush=False)
+
     # # Get results
     # results = {
-    #     "name"       : path.stem,
-    #     "label"      : np.arange(1, np.max(lbl) + 1),
-    #     "area"       : get_obj_area(lbl),
-    #     "C1_cyt_int" : get_obj_int(cyt_lbl, C1),
-    #     "C2_cyt_int" : get_obj_int(cyt_lbl, C2),
-    #     "C1_mbn_int" : get_obj_int(mbn_lbl, C1),
-    #     "C2_mbn_int" : get_obj_int(mbn_lbl, C2),
+    #     "name"            : path.stem,
+    #     "label"           : np.arange(1, np.max(lbl) + 1),
+    #     "volume"          : get_obj_volume(lbl) / rf**3,
+    #     "C1_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C1_rscale),
+    #     "C2_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C2_rscale),
+    #     "C1_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C1_rscale),
+    #     "C2_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C2_rscale),
+    #     "C1_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C1_rscale),
+    #     "C2_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C2_rscale),
+    #     "C1_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C1_rscale),
+    #     "C2_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C2_rscale),
     #     }
     
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
-        
-    # # -------------------------------------------------------------------------
     
     # t0 = time.time()
-    # print("run : ", end="", flush=False)
+    # print("upscale : ", end="", flush=False)
     
-    # mbn_out = mbn_lbl > 0
-    # mbn_out = mbn_out ^ binary_erosion(mbn_out)
+    # # Upscale (if needed)
+    # if rf < 1:
+    #     lbl = resize(lbl, C1.shape, order=0)
+    #     cyt_lbl = resize(cyt_lbl, C1.shape, order=0)
+    #     mbn_lbl = resize(mbn_lbl, C1.shape, order=0)
     
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
@@ -865,9 +1014,41 @@ if __name__ == "__main__":
     #     blending="additive", 
     #     opacity=0.50,
     #     )   
+
+#%%
+
+    # def subtract_background(Cx, lbl, mbn_lbl, kernel_size=9):
+    #     msk = np.maximum(lbl, mbn_lbl) > 0
+    #     msk = np.max(msk, axis=0) == 0
+    #     bgrd = Cx.copy().astype(float)
+    #     bgrd *= msk
+    #     bgrd[bgrd == 0] = np.nan
+    #     bgrd = nan_filt(bgrd, kernel_size=kernel_size)
+    #     bgrd = nan_replace(bgrd, kernel_size=kernel_size)
+    #     bsub = Cx.copy().astype(float) - bgrd
+    #     return bsub
     
+    # t0 = time.time()
+    # print("bgsub : ", end="", flush=False)
+    
+    # C1_rscale_bsub = subtract_background(
+    #     C1_rscale, lbl, mbn_lbl, kernel_size=9)
+    # C2_rscale_bsub = subtract_background(
+    #     C2_rscale, lbl, mbn_lbl, kernel_size=9)
+    
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
+
+    # # Display
+    # viewer = napari.Viewer()
     # viewer.add_image(
-    #     mbn_out, name="mbn_out", visible=1,
-    #     colormap="grey", blending="additive",  
+    #     C1_rscale_bsub, name="C1_bsub", visible=1,
+    #     colormap="gray", 
     #     gamma=1.0, opacity=1.00,
     #     )
+    # viewer.add_image(
+    #     C2_rscale_bsub, name="C2_bsub", visible=1,
+    #     colormap="gray", 
+    #     gamma=1.0, opacity=1.00,
+    #     )
+    

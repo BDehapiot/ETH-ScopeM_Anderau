@@ -90,32 +90,32 @@ if __name__ == "__main__":
     
 #%% Test : import_nd2() -------------------------------------------------------
 
-    # # Imports
-    # import time
-    # import napari
-    # from pathlib import Path
+    # Imports
+    import time
+    import napari
+    from pathlib import Path
     
-    # # Parameters
-    # z, c = "all", "all" 
+    # Parameters
+    z, c = "all", "all" 
     
-    # # Path(s)
-    # data_path = Path("D:\local_Anderau\data")
-    # # data_path = Path(r"\\scopem-idadata.ethz.ch\BDehapiot\remote_Anderau\data")
-    # paths = list(data_path.glob("*.nd2"))
+    # Path(s)
+    data_path = Path("D:\local_Anderau\data")
+    # data_path = Path(r"\\scopem-idadata.ethz.ch\BDehapiot\remote_Anderau\data")
+    paths = list(data_path.glob("*.nd2"))
     
-    # # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     
-    # t0 = time.time()
-    # print("import_nd2() :", end="", flush=False)
+    t0 = time.time()
+    print("import_nd2() :", end="", flush=False)
     
-    # arr, metadata = import_nd2(paths[0], z="all", c="all")
+    arr, metadata = import_nd2(paths[0], z="all", c="all")
     
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
     
-    # # Display
-    # vwr = napari.Viewer()
-    # vwr.add_image(arr)
+    # Display
+    vwr = napari.Viewer()
+    vwr.add_image(arr)
     
 #%% Import & save all ---------------------------------------------------------
 
