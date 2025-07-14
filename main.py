@@ -50,7 +50,7 @@ procedure = {
     "extract" : 0,
     "predict" : 0,
     "process" : 0,
-    "analyse" : 1,
+    "analyse" : 0,
     "display" : 0,
     
     }
@@ -81,7 +81,7 @@ parameters = {
         "bsub"      : True,
         
     # Analyse
-    "data"  : "C1_mbn_mean",
+    "data"  : "C1_all_mean",
     "tags0" : ["00min", "PEG12"],
     "tags1" : ["30min", "PEG12"],
 
@@ -313,7 +313,7 @@ class Main:
                 mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width))
                 mbn_lbl[cyt_msk] = 0
                 mbn_lbl = mbn_lbl.astype("uint8")
-                all_lbl = np.maximum(lbl, mbn_lbl)
+                all_lbl = np.maximum(cyt_lbl, mbn_lbl)
                     
                 # Background subtraction (optional)
                 if bsub:
@@ -336,6 +336,9 @@ class Main:
                 # Get results
                 results = {
                     "name"            : path.stem,
+                    "cond"            : path.stem.split("_")[0],
+                    "time"            : path.stem.split("_")[1],
+                    "replicate"       : int(path.stem.split("_")[2]),
                     "label"           : np.arange(1, np.max(lbl) + 1),
                     "volume_cyt"      : get_obj_volume(cyt_lbl),
                     "volume_mbn"      : get_obj_volume(mbn_lbl),
@@ -768,179 +771,181 @@ if __name__ == "__main__":
     
 #%% 
     
-    # idx = 5
-    # data_path = parameters["data_path"]
-    # paths = list(data_path.glob("*.nd2"))
-    # path = paths[idx]
-    # out_path = path.parent / path.stem
-    # C1 = io.imread(out_path / "C1.tif")
-    # C2 = io.imread(out_path / "C2.tif")
-    # C3 = io.imread(out_path / "C3.tif")
-    # prd = io.imread(out_path / "prd.tif")
+    idx = 5
+    data_path = parameters["data_path"]
+    paths = list(data_path.glob("*.nd2"))
+    path = paths[idx]
+    out_path = path.parent / path.stem
+    C1 = io.imread(out_path / "C1.tif")
+    C2 = io.imread(out_path / "C2.tif")
+    C3 = io.imread(out_path / "C3.tif")
+    prd = io.imread(out_path / "prd.tif")
     
-    # # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     
-    # # Parameters
-    # sigma0  = parameters["sigma0"]
-    # sigma1  = parameters["sigma1"]
-    # thresh0 = parameters["thresh0"] * 255
-    # thresh1 = parameters["thresh1"] * 255
-    # remove_border_objects = parameters["remove_border_objects"]
-    # min_sdist = parameters["min_sdist"]
-    # mbn_width = parameters["mbn_width"]
-    # bsub = parameters["bsub"]
+    # Parameters
+    sigma0  = parameters["sigma0"]
+    sigma1  = parameters["sigma1"]
+    thresh0 = parameters["thresh0"] * 255
+    thresh1 = parameters["thresh1"] * 255
+    remove_border_objects = parameters["remove_border_objects"]
+    min_sdist = parameters["min_sdist"]
+    mbn_width = parameters["mbn_width"]
+    bsub = parameters["bsub"]
 
-    # # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
-    # def remove_small_obj(lbl, min_size=1e4): # parameter
-    #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
-    #     msk = (vals != 0) & (counts >= min_size)
-    #     valid_vals = vals[msk]
-    #     msk_img = np.isin(lbl, valid_vals)
-    #     lbl_cleaned = np.where(msk_img, lbl, 0)
-    #     return relabel_sequential(lbl_cleaned)[0]
+    def remove_small_obj(lbl, min_size=1e4): # parameter
+        vals, counts = np.unique(lbl.ravel(), return_counts=True)
+        msk = (vals != 0) & (counts >= min_size)
+        valid_vals = vals[msk]
+        msk_img = np.isin(lbl, valid_vals)
+        lbl_cleaned = np.where(msk_img, lbl, 0)
+        return relabel_sequential(lbl_cleaned)[0]
     
-    # def get_synaptic_plane_dist(C3, med_size=21):
-    #     msk = C3 > 128 # parameter
-    #     msk = remove_small_objects(msk, min_size=1e5) # parameter
-    #     z_pos = msk.shape[0] - np.argmax(msk[::-1, :, :], axis=0)
-    #     z_pos = median(z_pos.astype("uint8"), footprint=disk(med_size))
-    #     sdist = np.arange(msk.shape[0])[:, np.newaxis, np.newaxis]
-    #     sdist = np.broadcast_to(sdist, msk.shape)
-    #     sdist = sdist - z_pos
-    #     return sdist
+    def get_synaptic_plane_dist(C3, med_size=21):
+        msk = C3 > 128 # parameter
+        msk = remove_small_objects(msk, min_size=1e5) # parameter
+        z_pos = msk.shape[0] - np.argmax(msk[::-1, :, :], axis=0)
+        z_pos = median(z_pos.astype("uint8"), footprint=disk(med_size))
+        sdist = np.arange(msk.shape[0])[:, np.newaxis, np.newaxis]
+        sdist = np.broadcast_to(sdist, msk.shape)
+        sdist = sdist - z_pos
+        return sdist
     
-    # def subtract_background(Cx, all_lbl, kernel_size=9):       
-    #     msk = all_lbl == 0
-    #     bgrd = Cx.copy().astype(float)
-    #     bgrd *= msk
-    #     bgrd[bgrd == 0] = np.nan
-    #     bgrd = rescale(bgrd, 0.25, order=0)
-    #     bgrd = nan_filt(bgrd, kernel_size=kernel_size)
-    #     bgrd = nan_replace(bgrd, kernel_size=kernel_size)
-    #     bgrd = resize(bgrd, Cx.shape, order=0)
-    #     bsub = Cx.copy().astype(float) - bgrd
-    #     return bsub.astype("float32")
+    def subtract_background(Cx, all_lbl, kernel_size=9):       
+        msk = all_lbl == 0
+        bgrd = Cx.copy().astype(float)
+        bgrd *= msk
+        bgrd[bgrd == 0] = np.nan
+        bgrd = rescale(bgrd, 0.25, order=0)
+        bgrd = nan_filt(bgrd, kernel_size=kernel_size)
+        bgrd = nan_replace(bgrd, kernel_size=kernel_size)
+        bgrd = resize(bgrd, Cx.shape, order=0)
+        bsub = Cx.copy().astype(float) - bgrd
+        return bsub.astype("float32")
     
-    # def get_mean_int_profiles(Cx, sdist, x_lbl, bin_size=1, min_bin=-10, max_bin=None):
-    #     sdist_prf = sdist[x_lbl > 0]
-    #     Cx_prf = Cx[x_lbl > 0]
-    #     if min_bin is None:
-    #         min_bin = np.min(sdist_prf)
-    #     if max_bin is None:
-    #         max_bin = np.max(sdist_prf)
-    #     bins = np.arange(min_bin, max_bin + bin_size, bin_size)
-    #     bin_idxs = np.digitize(sdist_prf, bins) - 1
-    #     bin_centers = (bins[:-1] + bins[1:]) / 2
-    #     mean_int_prf = np.full(len(bin_centers), np.nan)
-    #     for i in range(len(bin_centers)):
-    #         in_bin = bin_idxs == i
-    #         if np.any(in_bin):
-    #             mean_int_prf[i] = np.mean(Cx_prf[in_bin])
-    #     return np.column_stack((bin_centers, mean_int_prf))
+    def get_mean_int_profiles(Cx, sdist, x_lbl, bin_size=1, min_bin=-10, max_bin=None):
+        sdist_prf = sdist[x_lbl > 0]
+        Cx_prf = Cx[x_lbl > 0]
+        if min_bin is None:
+            min_bin = np.min(sdist_prf)
+        if max_bin is None:
+            max_bin = np.max(sdist_prf)
+        bins = np.arange(min_bin, max_bin + bin_size, bin_size)
+        bin_idxs = np.digitize(sdist_prf, bins) - 1
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        mean_int_prf = np.full(len(bin_centers), np.nan)
+        for i in range(len(bin_centers)):
+            in_bin = bin_idxs == i
+            if np.any(in_bin):
+                mean_int_prf[i] = np.mean(Cx_prf[in_bin])
+        return np.column_stack((bin_centers, mean_int_prf))
     
-    # def get_obj_volume(lbl):
-    #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
-    #     return counts[1:]
+    def get_obj_volume(lbl):
+        vals, counts = np.unique(lbl.ravel(), return_counts=True)
+        return counts[1:]
                     
-    # def get_obj_mean_int(lbl, img):
-    #     labels = np.unique(lbl)[1:]
-    #     return mean(img, labels=lbl, index=labels) 
+    def get_obj_mean_int(lbl, img):
+        labels = np.unique(lbl)[1:]
+        return mean(img, labels=lbl, index=labels) 
 
-    # # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     
-    # t0 = time.time()
-    # print("get labels : ", end="", flush=False)
+    t0 = time.time()
+    print("get labels : ", end="", flush=False)
 
-    # # Get labels
-    # msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
-    # msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
-    # if remove_border_objects:
-    #     msk0 = clear_border(msk0)
-    # msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
-    # mrk = label(msk1)
-    # lbl = watershed(-prd, mrk, mask=msk0).astype("uint8")
-    # sdist = get_synaptic_plane_dist(C3, med_size=21) # parameter
-    # lbl[find_boundaries(lbl)] = 0
-    # lbl = remove_small_obj(lbl, min_size=1e4)
+    # Get labels
+    msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
+    msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
+    if remove_border_objects:
+        msk0 = clear_border(msk0)
+    msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
+    mrk = label(msk1)
+    lbl = watershed(-prd, mrk, mask=msk0).astype("uint8")
+    sdist = get_synaptic_plane_dist(C3, med_size=21) # parameter
+    lbl[find_boundaries(lbl)] = 0
+    lbl = remove_small_obj(lbl, min_size=1e4)
     
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
      
-    # t0 = time.time()
-    # print("process labels : ", end="", flush=False)
+    t0 = time.time()
+    print("process labels : ", end="", flush=False)
     
-    # # Get cyt, mbn and all labels
-    # cyt_msk = binary_erosion(lbl > 0, footprint=ball(max(3, mbn_width)))
-    # cyt_lbl = lbl.copy()
-    # cyt_lbl[~cyt_msk] = 0
-    # cyt_lbl = cyt_lbl.astype("uint8")
-    # mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width))
-    # mbn_lbl[cyt_msk] = 0
-    # mbn_lbl = mbn_lbl.astype("uint8")
-    # all_lbl = np.maximum(lbl, mbn_lbl)
+    # Get cyt, mbn and all labels
+    cyt_msk = binary_erosion(lbl > 0, footprint=ball(max(3, mbn_width)))
+    cyt_lbl = lbl.copy()
+    cyt_lbl[~cyt_msk] = 0
+    cyt_lbl = cyt_lbl.astype("uint8")
+    mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width))
+    mbn_lbl[cyt_msk] = 0
+    mbn_lbl = mbn_lbl.astype("uint8")
+    all_lbl = np.maximum(lbl, mbn_lbl)
         
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
         
-    # t0 = time.time()
-    # print("background sub. : ", end="", flush=False)
+    t0 = time.time()
+    print("background sub. : ", end="", flush=False)
     
-    # if bsub:
-    #     C1 = subtract_background(C1, all_lbl, kernel_size=9)
-    #     C2 = subtract_background(C2, all_lbl, kernel_size=9)       
+    if bsub:
+        C1 = subtract_background(C1, all_lbl, kernel_size=9)
+        C2 = subtract_background(C2, all_lbl, kernel_size=9)       
     
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
     
-    # t0 = time.time()
-    # print("mean_int_profiles : ", end="", flush=False)
+    t0 = time.time()
+    print("mean_int_profiles : ", end="", flush=False)
     
-    # C1_cyt_mean_prf = get_mean_int_profiles(C1, sdist, cyt_lbl)
-    # C2_cyt_mean_prf = get_mean_int_profiles(C2, sdist, cyt_lbl)
-    # C1_mbn_mean_prf = get_mean_int_profiles(C1, sdist, mbn_lbl)
-    # C2_mbn_mean_prf = get_mean_int_profiles(C2, sdist, mbn_lbl)
-    # C1_all_mean_prf = get_mean_int_profiles(C1, sdist, all_lbl)
-    # C2_all_mean_prf = get_mean_int_profiles(C2, sdist, all_lbl)
+    C1_cyt_mean_prf = get_mean_int_profiles(C1, sdist, cyt_lbl)
+    C2_cyt_mean_prf = get_mean_int_profiles(C2, sdist, cyt_lbl)
+    C1_mbn_mean_prf = get_mean_int_profiles(C1, sdist, mbn_lbl)
+    C2_mbn_mean_prf = get_mean_int_profiles(C2, sdist, mbn_lbl)
+    C1_all_mean_prf = get_mean_int_profiles(C1, sdist, all_lbl)
+    C2_all_mean_prf = get_mean_int_profiles(C2, sdist, all_lbl)
     
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
     
-    # t0 = time.time()
-    # print("trim. sdist : ", end="", flush=False)
+    t0 = time.time()
+    print("trim. sdist : ", end="", flush=False)
 
-    # cyt_lbl[sdist < min_sdist] = 0
-    # mbn_lbl[sdist < min_sdist] = 0
-    # all_lbl[sdist < min_sdist] = 0
+    cyt_lbl[sdist < min_sdist] = 0
+    mbn_lbl[sdist < min_sdist] = 0
+    all_lbl[sdist < min_sdist] = 0
 
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
 
-    # t0 = time.time()
-    # print("measure : ", end="", flush=False)
+    t0 = time.time()
+    print("measure : ", end="", flush=False)
 
-    # # Get results
-    # results = {
-    #     "name"            : path.stem,
-    #     "label"           : np.arange(1, np.max(lbl) + 1),
-    #     "volume_cyt"      : get_obj_volume(cyt_lbl),
-    #     "volume_mbn"      : get_obj_volume(mbn_lbl),
-    #     "volume_all"      : get_obj_volume(all_lbl),
-    #     "C1_cyt_mean"     : get_obj_mean_int(cyt_lbl, C1),
-    #     "C2_cyt_mean"     : get_obj_mean_int(cyt_lbl, C2),
-    #     "C1_mbn_mean"     : get_obj_mean_int(mbn_lbl, C1),
-    #     "C2_mbn_mean"     : get_obj_mean_int(mbn_lbl, C2),
-    #     "C1_all_mean"     : get_obj_mean_int(all_lbl, C1),
-    #     "C2_all_mean"     : get_obj_mean_int(all_lbl, C2),
-    #     }
-    # results["C1_cyt_sum"] = results["C1_cyt_mean"] * results["volume_cyt"]
-    # results["C2_cyt_sum"] = results["C2_cyt_mean"] * results["volume_cyt"]
-    # results["C1_mbn_sum"] = results["C1_mbn_mean"] * results["volume_mbn"]
-    # results["C2_mbn_sum"] = results["C2_mbn_mean"] * results["volume_mbn"]
-    # results["C1_all_sum"] = results["C1_all_mean"] * results["volume_all"]
-    # results["C2_all_sum"] = results["C2_all_mean"] * results["volume_all"]
+    # Get results
+    results = {
+        "name"            : path.stem,
+        "label"           : np.arange(1, np.max(lbl) + 1),
+        "volume_cyt"      : get_obj_volume(cyt_lbl),
+        "volume_mbn"      : get_obj_volume(mbn_lbl),
+        "volume_all"      : get_obj_volume(all_lbl),
+        "C1_cyt_mean"     : get_obj_mean_int(cyt_lbl, C1),
+        "C2_cyt_mean"     : get_obj_mean_int(cyt_lbl, C2),
+        "C1_mbn_mean"     : get_obj_mean_int(mbn_lbl, C1),
+        "C2_mbn_mean"     : get_obj_mean_int(mbn_lbl, C2),
+        "C1_all_mean"     : get_obj_mean_int(all_lbl, C1),
+        "C2_all_mean"     : get_obj_mean_int(all_lbl, C2),
+        }
+    results["C1_cyt_sum"] = results["C1_cyt_mean"] * results["volume_cyt"]
+    results["C2_cyt_sum"] = results["C2_cyt_mean"] * results["volume_cyt"]
+    results["C1_mbn_sum"] = results["C1_mbn_mean"] * results["volume_mbn"]
+    results["C2_mbn_sum"] = results["C2_mbn_mean"] * results["volume_mbn"]
+    results["C1_all_sum"] = results["C1_all_mean"] * results["volume_all"]
+    results["C2_all_sum"] = results["C2_all_mean"] * results["volume_all"]
     
     # results_prf = {
+    #     "name"            : path.stem,
+    #     "label"           : np.arange(1, np.max(lbl) + 1),
     #     "bin_centers"     : C1_cyt_mean_prf[:, 0], 
     #     "C1_cyt_mean_prf" : C1_cyt_mean_prf[:, 1],
     #     "C2_cyt_mean_prf" : C2_cyt_mean_prf[:, 1],
@@ -950,86 +955,177 @@ if __name__ == "__main__":
     #     "C2_all_mean_prf" : C2_all_mean_prf[:, 1],
     #     }
     
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
-        
-    # # Save
-    # t0 = time.time()
-    # print("save    : ", end="", flush=False)
+    results["bin_centers"    ] = list(C1_cyt_mean_prf[:, 0]) 
+    results["C1_cyt_mean_prf"] = list(C1_cyt_mean_prf[:, 1])
+    results["C2_cyt_mean_prf"] = list(C2_cyt_mean_prf[:, 1])
+    results["C1_mbn_mean_prf"] = list(C1_mbn_mean_prf[:, 1])
+    results["C2_mbn_mean_prf"] = list(C2_mbn_mean_prf[:, 1])
+    results["C1_all_mean_prf"] = list(C1_all_mean_prf[:, 1])
+    results["C2_all_mean_prf"] = list(C2_all_mean_prf[:, 1])
+
     
-    # # csv
-    # results = pd.DataFrame(results)   
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
+        
+    # Save
+    t0 = time.time()
+    print("save    : ", end="", flush=False)
+    
+    # csv
+    results = pd.DataFrame(results)   
     # results_prf = pd.DataFrame(results_prf)   
-    # results.to_csv(out_path / "results.csv", index=False)
+    results.to_csv(out_path / "results.csv", index=False)
     # results_prf.to_csv(out_path / "results_prf.csv", index=False)
     
-    # # tif
-    # io.imsave(out_path / "lbl.tif", lbl, check_contrast=False)
-    # io.imsave(out_path / "cyt_lbl.tif", cyt_lbl, check_contrast=False)
-    # io.imsave(out_path / "mbn_lbl.tif", mbn_lbl, check_contrast=False)
-    # io.imsave(out_path / "all_lbl.tif", all_lbl, check_contrast=False)
+    # tif
+    io.imsave(out_path / "lbl.tif", lbl, check_contrast=False)
+    io.imsave(out_path / "cyt_lbl.tif", cyt_lbl, check_contrast=False)
+    io.imsave(out_path / "mbn_lbl.tif", mbn_lbl, check_contrast=False)
+    io.imsave(out_path / "all_lbl.tif", all_lbl, check_contrast=False)
     
-    # if bsub:
-    #     io.imsave(out_path / "C1_bsub.tif", C1, check_contrast=False)
-    #     io.imsave(out_path / "C2_bsub.tif", C2, check_contrast=False)
+    if bsub:
+        io.imsave(out_path / "C1_bsub.tif", C1, check_contrast=False)
+        io.imsave(out_path / "C2_bsub.tif", C2, check_contrast=False)
     
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
+    t1 = time.time()
+    print(f"{t1 - t0:.3f}s")
+    
+    # -------------------------------------------------------------------------
+    
+    # Display
+    viewer = napari.Viewer()
+    
+    viewer.add_image(
+        C2, name="C2", visible=1,
+        colormap="gray", 
+        gamma=1.0, opacity=1.00,
+        contrast_limits = parameters["C2_contrast_limits"],
+        )
+    viewer.add_image(
+        C1, name="C1", visible=0,
+        colormap="gray", 
+        gamma=1.0, opacity=1.00,
+        contrast_limits = parameters["C1_contrast_limits"],
+        )
+    
+    viewer.add_image(
+        prd, name="prd", visible=0,
+        colormap="inferno", blending="additive",  
+        gamma=1.0, opacity=0.25,
+        )
+    
+    viewer.add_image(
+        msk0, name="msk0", visible=0,
+        colormap="bop orange", blending="additive",  
+        gamma=1.0, opacity=0.25,
+        rendering="attenuated_mip", attenuation=0.5,
+        )
+    viewer.add_image(
+        msk1, name="msk1", visible=0,
+        colormap="bop blue", blending="additive",  
+        gamma=1.0, opacity=0.25,
+        rendering="attenuated_mip", attenuation=0.5,
+        )
+        
+    viewer.add_labels(
+        cyt_lbl, name="cyt_lbl", visible=0,
+        blending="additive", 
+        opacity=0.50,
+        )
+    viewer.add_labels(
+        mbn_lbl, name="mbn_lbl", visible=0,
+        blending="additive", 
+        opacity=0.50,
+        )
+    viewer.add_labels(
+        lbl, name="all_lbl", visible=0,
+        blending="additive", 
+        opacity=0.50,
+        )   
+    viewer.add_labels(
+        lbl, name="lbl", visible=0,
+        blending="additive", 
+        opacity=0.50,
+        )   
+    
+    viewer.add_image(
+        sdist, name="sdist", visible=0,
+        blending="additive", 
+        opacity=0.50,
+        ) 
+
+#%%
+
+    # # imports
+    # import matplotlib.pyplot as plt
+    # from matplotlib.gridspec import GridSpec
+
+    # # Parameters
+    # paths = list(parameters["data_path"].glob("*.nd2"))
+    # prf_paths = list(parameters["data_path"].rglob("*_prf.csv"))
     
     # # -------------------------------------------------------------------------
     
-    # # Display
-    # viewer = napari.Viewer()
+    # def filter_data(df, tags):
+    #     if tags:
+    #         mask = df["name"].apply(lambda x: all(tag in x for tag in tags))
+    #     else:
+    #         mask = pd.Series(True, index=df.index)
+    #     return df.loc[mask]
+
+    # # -------------------------------------------------------------------------
+
+    # # Load & merge results
+    # results_m = []
+    # for path in paths:
+    #     out_path = path.parent / path.stem
+    #     results_m.append(pd.read_csv(out_path / "results.csv"))
+    # results_m = pd.concat(results_m, ignore_index=True)
+    # results_m_mean = results_m.groupby("name").mean(numeric_only=True).reset_index()
     
-    # viewer.add_image(
-    #     C2, name="C2", visible=1,
-    #     colormap="gray", 
-    #     gamma=1.0, opacity=1.00,
-    #     contrast_limits = parameters["C2_contrast_limits"],
-    #     )
-    # viewer.add_image(
-    #     C1, name="C1", visible=0,
-    #     colormap="gray", 
-    #     gamma=1.0, opacity=1.00,
-    #     contrast_limits = parameters["C1_contrast_limits"],
-    #     )
+    # # Load & merge results_prf
+    # results_prf = []
     
-    # viewer.add_image(
-    #     prd, name="prd", visible=0,
-    #     colormap="inferno", blending="additive",  
-    #     gamma=1.0, opacity=0.25,
-    #     )
     
-    # viewer.add_image(
-    #     msk0, name="msk0", visible=0,
-    #     colormap="bop orange", blending="additive",  
-    #     gamma=1.0, opacity=0.25,
-    #     rendering="attenuated_mip", attenuation=0.5,
-    #     )
-    # viewer.add_image(
-    #     msk1, name="msk1", visible=0,
-    #     colormap="bop blue", blending="additive",  
-    #     gamma=1.0, opacity=0.25,
-    #     rendering="attenuated_mip", attenuation=0.5,
-    #     )
+    # # Plot --------------------------------------------------------------------
+    
+    # cond = "PEG12"
+    # channel = "C1"
+    # timepoints = ["00min", "15min", "30min"]
+    # fig = plt.figure(figsize=(9, 9), layout="tight")
+    # gs = GridSpec(3, 3, figure=fig)
+            
+    # # Metrics & axis mapping 
+    # metrics = [
+    #     ("cyt_mean"    , (0, 0)),
+    #     ("mbn_mean"    , (1, 0)),
+    #     ("all_mean"    , (2, 0)),
+    #     ("cyt_sum"     , (0, 1)),
+    #     ("mbn_sum"     , (1, 1)),
+    #     ("all_sum"     , (2, 1)),
+    #     ("cyt_mean_prf", (0, 2)),
+    #     ("mbn_mean_prf", (1, 2)),
+    #     ("all_mean_prf", (2, 2)),
+    #     ]
+    
+    # # Axes dict.
+    # axes = {
+    #     metric: fig.add_subplot(gs[row, col]) 
+    #     for metric, (row, col) in metrics
+    #     }
         
-    # viewer.add_labels(
-    #     cyt_lbl, name="cyt_lbl", visible=0,
-    #     blending="additive", 
-    #     opacity=0.50,
-    #     )
-    # viewer.add_labels(
-    #     mbn_lbl, name="mbn_lbl", visible=0,
-    #     blending="additive", 
-    #     opacity=0.50,
-    #     )
-    # viewer.add_labels(
-    #     lbl, name="all_lbl", visible=0,
-    #     blending="additive", 
-    #     opacity=0.50,
-    #     )   
-    # viewer.add_labels(
-    #     lbl, name="lbl", visible=0,
-    #     blending="additive", 
-    #     opacity=0.50,
-    #     )   
+    # # Plot dots + bars
+    # for m, (metric, ax) in enumerate(axes.items()):
+    #     if m < 6:
+    #         for t, tp in enumerate(timepoints):
+    #             key = f"{channel}_{metric}"
+    #             data = filter_data(results_m_mean, [cond, tp])[key]
+    #             ax.bar((t,) * len(data), np.mean(data), color="lightgray")
+    #             ax.scatter((t,) * len(data), data)
+    #         ax.set_title(f"({channel}) {cond}_" + metric)
+    #         ax.set_xticks([0, 1, 2])
+    #         ax.set_xticklabels(timepoints)     
+    
+    # # # Plot profiles
+    # # for m, (metric, ax) in enumerate(axes.items()):
+    # #     if m >= 6:
