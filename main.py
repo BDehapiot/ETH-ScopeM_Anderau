@@ -69,20 +69,19 @@ parameters = {
     # Process
     
         # Get labels
-        "rf"        : 0.5,   
-        "bsub"      : True,
         "sigma0"    : 0.5,
         "sigma1"    : 2,
         "thresh0"   : 0.01,
         "thresh1"   : 0.5,
         "remove_border_objects" : False,
-        "min_sdist" : 5,
+        "min_sdist" : 5, # pixels (of rescaled data)
     
         # Get intensities
-        "mbn_width" : 3,
+        "mbn_width" : 3, # pixels (of rescaled data)
+        "bsub"      : True,
         
     # Analyse
-    "data"  : "C1_mbn_mean_int",
+    "data"  : "C1_mbn_mean",
     "tags0" : ["00min", "PEG12"],
     "tags1" : ["30min", "PEG12"],
 
@@ -230,16 +229,35 @@ class Main:
             sdist = sdist - z_pos
             return sdist
         
-        def subtract_background(Cx, lbl, mbn_lbl, kernel_size=9):
-            msk = np.maximum(lbl, mbn_lbl) > 0
-            msk = np.max(msk, axis=0) == 0
+        def subtract_background(Cx, all_lbl, kernel_size=9):       
+            msk = all_lbl == 0
             bgrd = Cx.copy().astype(float)
             bgrd *= msk
             bgrd[bgrd == 0] = np.nan
+            bgrd = rescale(bgrd, 0.25, order=0)
             bgrd = nan_filt(bgrd, kernel_size=kernel_size)
             bgrd = nan_replace(bgrd, kernel_size=kernel_size)
+            bgrd = resize(bgrd, Cx.shape, order=0)
             bsub = Cx.copy().astype(float) - bgrd
-            return bsub
+            return bsub.astype("float32")
+        
+        def get_mean_int_profiles(
+                Cx, sdist, x_lbl, bin_size=1, min_bin=-10, max_bin=100):
+            sdist_prf = sdist[x_lbl > 0]
+            Cx_prf = Cx[x_lbl > 0]
+            if min_bin is None:
+                min_bin = np.min(sdist_prf)
+            if max_bin is None:
+                max_bin = np.max(sdist_prf)
+            bins = np.arange(min_bin, max_bin + bin_size, bin_size)
+            bin_idxs = np.digitize(sdist_prf, bins) - 1
+            bin_centers = (bins[:-1] + bins[1:]) / 2
+            mean_int_prf = np.full(len(bin_centers), np.nan)
+            for i in range(len(bin_centers)):
+                in_bin = bin_idxs == i
+                if np.any(in_bin):
+                    mean_int_prf[i] = np.mean(Cx_prf[in_bin])
+            return np.column_stack((bin_centers, mean_int_prf))
         
         def get_obj_volume(lbl):
             vals, counts = np.unique(lbl.ravel(), return_counts=True)
@@ -248,16 +266,12 @@ class Main:
         def get_obj_mean_int(lbl, img):
             labels = np.unique(lbl)[1:]
             return mean(img, labels=lbl, index=labels) 
-        
-        def get_obj_sum_int(lbl, img):
-            labels = np.unique(lbl)[1:]
-            return sum_labels(img, labels=lbl, index=labels)
-        
+
         def _process(path):
             
             out_path = path.parent / path.stem
             lbl_path = out_path / "lbl.tif"
-            
+
             if lbl_path.exists() and self.procedure["process"] == 1:
             
                 return
@@ -277,97 +291,106 @@ class Main:
                 print(f"{t1 - t0:.3f}s")
                 
                 t0 = time.time()
-                print("process : ", end="", flush=False)
+                print("Process : ", end="", flush=False)
             
-                # Downscale (optional)
-                if rf < 1:
-                    C1_rscale = rescale(C1, rf, order=0, preserve_range=True)
-                    C2_rscale = rescale(C2, rf, order=0, preserve_range=True)
-                    C3_rscale = rescale(C3, rf, order=0, preserve_range=True)
-                    prd_rscale = rescale(prd, rf, order=0, preserve_range=True)
-                       
                 # Get labels
-                msk0 = gaussian(
-                    prd_rscale, sigma=sigma0, preserve_range=True) > thresh0
-                msk0 = remove_small_holes(msk0, area_threshold=1e4 * rf**3) # parameter
+                msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
+                msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
                 if remove_border_objects:
                     msk0 = clear_border(msk0)
-                msk1 = gaussian(
-                    prd_rscale, sigma=sigma1, preserve_range=True) > thresh1
+                msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
                 mrk = label(msk1)
-                lbl = watershed(-prd_rscale, mrk, mask=msk0).astype("uint8")
-                sdist = get_synaptic_plane_dist(C3_rscale, med_size=21 * rf) # parameter
-                lbl[sdist < min_sdist * rf] = 0
+                lbl = watershed(-prd, mrk, mask=msk0).astype("uint8")
+                sdist = get_synaptic_plane_dist(C3, med_size=21) # parameter
                 lbl[find_boundaries(lbl)] = 0
-                lbl = remove_small_obj(lbl, min_size=1e4 * rf**3)
-
-                # Get intensities
-                cyt_msk = binary_erosion(
-                    lbl > 0, footprint=ball(max(3, mbn_width * rf)))
+                lbl = remove_small_obj(lbl, min_size=1e4)
+                                
+                # Get cyt, mbn and all labels
+                cyt_msk = binary_erosion(lbl > 0, footprint=ball(max(3, mbn_width)))
                 cyt_lbl = lbl.copy()
                 cyt_lbl[~cyt_msk] = 0
                 cyt_lbl = cyt_lbl.astype("uint8")
-                mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width * rf))
+                mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width))
                 mbn_lbl[cyt_msk] = 0
                 mbn_lbl = mbn_lbl.astype("uint8")
-                
+                all_lbl = np.maximum(lbl, mbn_lbl)
+                    
                 # Background subtraction (optional)
                 if bsub:
-                    C1_rscale = subtract_background(
-                        C1_rscale, lbl, mbn_lbl, kernel_size=9)
-                    C2_rscale = subtract_background(
-                        C2_rscale, lbl, mbn_lbl, kernel_size=9)
-
+                    C1 = subtract_background(C1, all_lbl, kernel_size=9)
+                    C2 = subtract_background(C2, all_lbl, kernel_size=9)       
+                
+                # Mean intensity profile (mean int vs. sdist)                
+                C1_cyt_mean_prf = get_mean_int_profiles(C1, sdist, cyt_lbl)
+                C2_cyt_mean_prf = get_mean_int_profiles(C2, sdist, cyt_lbl)
+                C1_mbn_mean_prf = get_mean_int_profiles(C1, sdist, mbn_lbl)
+                C2_mbn_mean_prf = get_mean_int_profiles(C2, sdist, mbn_lbl)
+                C1_all_mean_prf = get_mean_int_profiles(C1, sdist, all_lbl)
+                C2_all_mean_prf = get_mean_int_profiles(C2, sdist, all_lbl)
+                
+                # Trim lbl masks (acc. to sdist)
+                cyt_lbl[sdist < min_sdist] = 0
+                mbn_lbl[sdist < min_sdist] = 0
+                all_lbl[sdist < min_sdist] = 0
+                        
                 # Get results
                 results = {
                     "name"            : path.stem,
                     "label"           : np.arange(1, np.max(lbl) + 1),
-                    "volume"          : get_obj_volume(lbl) / rf**3,
-                    "C1_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C1_rscale),
-                    "C2_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C2_rscale),
-                    "C1_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C1_rscale),
-                    "C2_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C2_rscale),
-                    "C1_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C1_rscale),
-                    "C2_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C2_rscale),
-                    "C1_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C1_rscale),
-                    "C2_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C2_rscale),
-                    "C1_all_mean_int" : get_obj_mean_int(
-                        np.maximum(lbl, mbn_lbl), C1_rscale),
-                    "C2_all_mean_int" : get_obj_mean_int(
-                        np.maximum(lbl, mbn_lbl), C2_rscale),
-                    "C1_all_sum_int"  : get_obj_sum_int(
-                        np.maximum(lbl, mbn_lbl), C1_rscale),
-                    "C2_all_sum_int"  : get_obj_sum_int(
-                        np.maximum(lbl, mbn_lbl), C2_rscale),
+                    "volume_cyt"      : get_obj_volume(cyt_lbl),
+                    "volume_mbn"      : get_obj_volume(mbn_lbl),
+                    "volume_all"      : get_obj_volume(all_lbl),
+                    "C1_cyt_mean"     : get_obj_mean_int(cyt_lbl, C1),
+                    "C2_cyt_mean"     : get_obj_mean_int(cyt_lbl, C2),
+                    "C1_mbn_mean"     : get_obj_mean_int(mbn_lbl, C1),
+                    "C2_mbn_mean"     : get_obj_mean_int(mbn_lbl, C2),
+                    "C1_all_mean"     : get_obj_mean_int(all_lbl, C1),
+                    "C2_all_mean"     : get_obj_mean_int(all_lbl, C2),
                     }
-
-                # Upscale (if downscale)
-                if rf < 1:
-                    lbl = resize(lbl, C1.shape, order=0)
-                    cyt_lbl = resize(cyt_lbl, C1.shape, order=0)
-                    mbn_lbl = resize(mbn_lbl, C1.shape, order=0)
+                results["C1_cyt_sum"] = results["C1_cyt_mean"] * results["volume_cyt"]
+                results["C2_cyt_sum"] = results["C2_cyt_mean"] * results["volume_cyt"]
+                results["C1_mbn_sum"] = results["C1_mbn_mean"] * results["volume_mbn"]
+                results["C2_mbn_sum"] = results["C2_mbn_mean"] * results["volume_mbn"]
+                results["C1_all_sum"] = results["C1_all_mean"] * results["volume_all"]
+                results["C2_all_sum"] = results["C2_all_mean"] * results["volume_all"]
+                
+                results_prf = {
+                    "bin_centers"     : C1_cyt_mean_prf[:, 0], 
+                    "C1_cyt_mean_prf" : C1_cyt_mean_prf[:, 1],
+                    "C2_cyt_mean_prf" : C2_cyt_mean_prf[:, 1],
+                    "C1_mbn_mean_prf" : C1_mbn_mean_prf[:, 1],
+                    "C2_mbn_mean_prf" : C2_mbn_mean_prf[:, 1],
+                    "C1_all_mean_prf" : C1_all_mean_prf[:, 1],
+                    "C2_all_mean_prf" : C2_all_mean_prf[:, 1],
+                    }
                 
                 t1 = time.time()
                 print(f"{t1 - t0:.3f}s")
-                
+                    
                 # Save
                 t0 = time.time()
                 print("save    : ", end="", flush=False)
                 
                 # csv
                 results = pd.DataFrame(results)   
+                results_prf = pd.DataFrame(results_prf)   
                 results.to_csv(out_path / "results.csv", index=False)
+                results_prf.to_csv(out_path / "results_prf.csv", index=False)
                 
                 # tif
                 io.imsave(out_path / "lbl.tif", lbl, check_contrast=False)
                 io.imsave(out_path / "cyt_lbl.tif", cyt_lbl, check_contrast=False)
                 io.imsave(out_path / "mbn_lbl.tif", mbn_lbl, check_contrast=False)
+                io.imsave(out_path / "all_lbl.tif", all_lbl, check_contrast=False)
+                
+                if bsub:
+                    io.imsave(out_path / "C1_bsub.tif", C1, check_contrast=False)
+                    io.imsave(out_path / "C2_bsub.tif", C2, check_contrast=False)
                 
                 t1 = time.time()
                 print(f"{t1 - t0:.3f}s")
                 
         # Fetch 
-        rf       = self.parameters["rf"]
         sigma0   = self.parameters["sigma0"]
         sigma1   = self.parameters["sigma1"]
         thresh0  = self.parameters["thresh0"] * 255
@@ -401,12 +424,14 @@ class Main:
         def plot(df0, df1):
                         
             # Data
-            avgs = [df0[data].mean(), df1[data].mean()]
-            errs = [df0[data].std() , df1[data].std() ]
             x = np.arange(2) 
-            
+            avgs = [df0[data].mean(), df1[data].mean()]
+            std0 = df0[data].std()
+            std1 = df1[data].std()
+            errs = [std0, std1] # to be implemented
+
             # Plot
-            plt.bar(x, avgs, yerr=errs, capsize=20, color="lightgray")
+            plt.bar(x, avgs, color="lightgray")
             
             # Format
             plt.title(data)
@@ -741,71 +766,9 @@ if __name__ == "__main__":
     main = Main()
     display = Display()
     
-#%% Plot ----------------------------------------------------------------------
-
-    # # Imports 
-    
-    # import matplotlib.pyplot as plt
-
-    # # Parameters
-    
-    # data = "C1_mbn_int"
-    # tags0 = ["00min", "PEG34"]
-    # tags1 = ["30min", "PEG34"]
-    
-    # # -------------------------------------------------------------------------
-
-    # data_path = parameters["data_path"]
-    # paths = list(data_path.glob("*.tif"))
-
-    # # -------------------------------------------------------------------------
-    
-    # results_m = []
-    # for path in paths:
-    #     out_path = path.parent / path.stem
-    #     results_m.append(pd.read_csv(out_path / "results.csv"))
-    # results_m = pd.concat(results_m, ignore_index=True)
-    
-    # # -------------------------------------------------------------------------
-    
-    # def filter_data(df, tags):
-    #     if tags:
-    #         mask = df["name"].apply(lambda x: all(tag in x for tag in tags))
-    #     else:
-    #         mask = pd.Series(True, index=df.index)
-    #     return df.loc[mask]
-
-    # df0 = filter_data(results_m, tags0)
-    # df1 = filter_data(results_m, tags1)
-    
-    # # -------------------------------------------------------------------------
-        
-    # # Data
-    # avgs = [df0[data].mean(), df1[data].mean()]
-    # sems = [df0[data].sem() , df1[data].sem() ]
-    # x = np.arange(2) 
-    
-    # # Plot
-    # plt.bar(
-    #     x, avgs, yerr=sems, 
-    #     color="lightgray", capsize=10
-    #     )
-    
-    # # Format
-    # title = (
-    #     f"{data}\n"
-    #     f"tags0 : {tags0}\n"
-    #     f"tags1 : {tags1}\n"
-    #     )
-        
-    # plt.title(title)
-    # plt.xticks(x, ["cond0", "cond1"])
-    # plt.ylabel("fluo. int. (A.U.)")
-    
 #%% 
     
-    # idx = 8
-    # rf = 0.5
+    # idx = 5
     # data_path = parameters["data_path"]
     # paths = list(data_path.glob("*.nd2"))
     # path = paths[idx]
@@ -823,8 +786,9 @@ if __name__ == "__main__":
     # thresh0 = parameters["thresh0"] * 255
     # thresh1 = parameters["thresh1"] * 255
     # remove_border_objects = parameters["remove_border_objects"]
-    # min_sdist = parameters["min_sdist"] = 5
+    # min_sdist = parameters["min_sdist"]
     # mbn_width = parameters["mbn_width"]
+    # bsub = parameters["bsub"]
 
     # # -------------------------------------------------------------------------
 
@@ -846,16 +810,34 @@ if __name__ == "__main__":
     #     sdist = sdist - z_pos
     #     return sdist
     
-    # def subtract_background(Cx, lbl, mbn_lbl, kernel_size=9):
-    #     msk = np.maximum(lbl, mbn_lbl) > 0
-    #     msk = np.max(msk, axis=0) == 0
+    # def subtract_background(Cx, all_lbl, kernel_size=9):       
+    #     msk = all_lbl == 0
     #     bgrd = Cx.copy().astype(float)
     #     bgrd *= msk
     #     bgrd[bgrd == 0] = np.nan
+    #     bgrd = rescale(bgrd, 0.25, order=0)
     #     bgrd = nan_filt(bgrd, kernel_size=kernel_size)
     #     bgrd = nan_replace(bgrd, kernel_size=kernel_size)
+    #     bgrd = resize(bgrd, Cx.shape, order=0)
     #     bsub = Cx.copy().astype(float) - bgrd
-    #     return bsub
+    #     return bsub.astype("float32")
+    
+    # def get_mean_int_profiles(Cx, sdist, x_lbl, bin_size=1, min_bin=-10, max_bin=None):
+    #     sdist_prf = sdist[x_lbl > 0]
+    #     Cx_prf = Cx[x_lbl > 0]
+    #     if min_bin is None:
+    #         min_bin = np.min(sdist_prf)
+    #     if max_bin is None:
+    #         max_bin = np.max(sdist_prf)
+    #     bins = np.arange(min_bin, max_bin + bin_size, bin_size)
+    #     bin_idxs = np.digitize(sdist_prf, bins) - 1
+    #     bin_centers = (bins[:-1] + bins[1:]) / 2
+    #     mean_int_prf = np.full(len(bin_centers), np.nan)
+    #     for i in range(len(bin_centers)):
+    #         in_bin = bin_idxs == i
+    #         if np.any(in_bin):
+    #             mean_int_prf[i] = np.mean(Cx_prf[in_bin])
+    #     return np.column_stack((bin_centers, mean_int_prf))
     
     # def get_obj_volume(lbl):
     #     vals, counts = np.unique(lbl.ravel(), return_counts=True)
@@ -864,41 +846,23 @@ if __name__ == "__main__":
     # def get_obj_mean_int(lbl, img):
     #     labels = np.unique(lbl)[1:]
     #     return mean(img, labels=lbl, index=labels) 
-    
-    # def get_obj_sum_int(lbl, img):
-    #     labels = np.unique(lbl)[1:]
-    #     return sum_labels(img, labels=lbl, index=labels)
 
     # # -------------------------------------------------------------------------
     
     # t0 = time.time()
-    # print("downscale : ", end="", flush=False)
-
-    # # Downscale (if needed)
-    # if rf < 1:
-    #     C1_rscale = rescale(C1, rf, order=0, preserve_range=True)
-    #     C2_rscale = rescale(C2, rf, order=0, preserve_range=True)
-    #     C3_rscale = rescale(C3, rf, order=0, preserve_range=True)
-    #     prd_rscale = rescale(prd, rf, order=0, preserve_range=True)
-
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
-
-    # t0 = time.time()
     # print("get labels : ", end="", flush=False)
 
     # # Get labels
-    # msk0 = gaussian(prd_rscale, sigma=sigma0, preserve_range=True) > thresh0
-    # msk0 = remove_small_holes(msk0, area_threshold=1e4 * rf**3) # parameter
+    # msk0 = gaussian(prd, sigma=sigma0, preserve_range=True) > thresh0
+    # msk0 = remove_small_holes(msk0, area_threshold=1e4) # parameter
     # if remove_border_objects:
     #     msk0 = clear_border(msk0)
-    # msk1 = gaussian(prd_rscale, sigma=sigma1, preserve_range=True) > thresh1
+    # msk1 = gaussian(prd, sigma=sigma1, preserve_range=True) > thresh1
     # mrk = label(msk1)
-    # lbl = watershed(-prd_rscale, mrk, mask=msk0).astype("uint8")
-    # sdist = get_synaptic_plane_dist(C3_rscale, med_size=21 * rf) # parameter
-    # lbl[sdist < min_sdist * rf] = 0
+    # lbl = watershed(-prd, mrk, mask=msk0).astype("uint8")
+    # sdist = get_synaptic_plane_dist(C3, med_size=21) # parameter
     # lbl[find_boundaries(lbl)] = 0
-    # lbl = remove_small_obj(lbl, min_size=1e4 * rf**3)
+    # lbl = remove_small_obj(lbl, min_size=1e4)
     
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
@@ -906,26 +870,49 @@ if __name__ == "__main__":
     # t0 = time.time()
     # print("process labels : ", end="", flush=False)
     
-    # # Get intensities
-    # cyt_msk = binary_erosion(lbl > 0, footprint=ball(max(3, mbn_width * rf)))
+    # # Get cyt, mbn and all labels
+    # cyt_msk = binary_erosion(lbl > 0, footprint=ball(max(3, mbn_width)))
     # cyt_lbl = lbl.copy()
     # cyt_lbl[~cyt_msk] = 0
     # cyt_lbl = cyt_lbl.astype("uint8")
-    # mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width * rf))
+    # mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width))
     # mbn_lbl[cyt_msk] = 0
     # mbn_lbl = mbn_lbl.astype("uint8")
+    # all_lbl = np.maximum(lbl, mbn_lbl)
         
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
+        
+    # t0 = time.time()
+    # print("background sub. : ", end="", flush=False)
+    
+    # if bsub:
+    #     C1 = subtract_background(C1, all_lbl, kernel_size=9)
+    #     C2 = subtract_background(C2, all_lbl, kernel_size=9)       
+    
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
     
     # t0 = time.time()
-    # print("background sub. : ", end="", flush=False)
+    # print("mean_int_profiles : ", end="", flush=False)
     
-    # C1_rscale = subtract_background(
-    #     C1_rscale, lbl, mbn_lbl, kernel_size=9)
-    # C2_rscale = subtract_background(
-    #     C2_rscale, lbl, mbn_lbl, kernel_size=9)
+    # C1_cyt_mean_prf = get_mean_int_profiles(C1, sdist, cyt_lbl)
+    # C2_cyt_mean_prf = get_mean_int_profiles(C2, sdist, cyt_lbl)
+    # C1_mbn_mean_prf = get_mean_int_profiles(C1, sdist, mbn_lbl)
+    # C2_mbn_mean_prf = get_mean_int_profiles(C2, sdist, mbn_lbl)
+    # C1_all_mean_prf = get_mean_int_profiles(C1, sdist, all_lbl)
+    # C2_all_mean_prf = get_mean_int_profiles(C2, sdist, all_lbl)
     
+    # t1 = time.time()
+    # print(f"{t1 - t0:.3f}s")
+    
+    # t0 = time.time()
+    # print("trim. sdist : ", end="", flush=False)
+
+    # cyt_lbl[sdist < min_sdist] = 0
+    # mbn_lbl[sdist < min_sdist] = 0
+    # all_lbl[sdist < min_sdist] = 0
+
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
 
@@ -936,28 +923,55 @@ if __name__ == "__main__":
     # results = {
     #     "name"            : path.stem,
     #     "label"           : np.arange(1, np.max(lbl) + 1),
-    #     "volume"          : get_obj_volume(lbl) / rf**3,
-    #     "C1_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C1_rscale),
-    #     "C2_cyt_mean_int" : get_obj_mean_int(cyt_lbl, C2_rscale),
-    #     "C1_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C1_rscale),
-    #     "C2_mbn_mean_int" : get_obj_mean_int(mbn_lbl, C2_rscale),
-    #     "C1_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C1_rscale),
-    #     "C2_cyt_sum_int"  : get_obj_sum_int(cyt_lbl,  C2_rscale),
-    #     "C1_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C1_rscale),
-    #     "C2_mbn_sum_int"  : get_obj_sum_int(mbn_lbl,  C2_rscale),
+    #     "volume_cyt"      : get_obj_volume(cyt_lbl),
+    #     "volume_mbn"      : get_obj_volume(mbn_lbl),
+    #     "volume_all"      : get_obj_volume(all_lbl),
+    #     "C1_cyt_mean"     : get_obj_mean_int(cyt_lbl, C1),
+    #     "C2_cyt_mean"     : get_obj_mean_int(cyt_lbl, C2),
+    #     "C1_mbn_mean"     : get_obj_mean_int(mbn_lbl, C1),
+    #     "C2_mbn_mean"     : get_obj_mean_int(mbn_lbl, C2),
+    #     "C1_all_mean"     : get_obj_mean_int(all_lbl, C1),
+    #     "C2_all_mean"     : get_obj_mean_int(all_lbl, C2),
+    #     }
+    # results["C1_cyt_sum"] = results["C1_cyt_mean"] * results["volume_cyt"]
+    # results["C2_cyt_sum"] = results["C2_cyt_mean"] * results["volume_cyt"]
+    # results["C1_mbn_sum"] = results["C1_mbn_mean"] * results["volume_mbn"]
+    # results["C2_mbn_sum"] = results["C2_mbn_mean"] * results["volume_mbn"]
+    # results["C1_all_sum"] = results["C1_all_mean"] * results["volume_all"]
+    # results["C2_all_sum"] = results["C2_all_mean"] * results["volume_all"]
+    
+    # results_prf = {
+    #     "bin_centers"     : C1_cyt_mean_prf[:, 0], 
+    #     "C1_cyt_mean_prf" : C1_cyt_mean_prf[:, 1],
+    #     "C2_cyt_mean_prf" : C2_cyt_mean_prf[:, 1],
+    #     "C1_mbn_mean_prf" : C1_mbn_mean_prf[:, 1],
+    #     "C2_mbn_mean_prf" : C2_mbn_mean_prf[:, 1],
+    #     "C1_all_mean_prf" : C1_all_mean_prf[:, 1],
+    #     "C2_all_mean_prf" : C2_all_mean_prf[:, 1],
     #     }
     
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
-    
+        
+    # # Save
     # t0 = time.time()
-    # print("upscale : ", end="", flush=False)
+    # print("save    : ", end="", flush=False)
     
-    # # Upscale (if needed)
-    # if rf < 1:
-    #     lbl = resize(lbl, C1.shape, order=0)
-    #     cyt_lbl = resize(cyt_lbl, C1.shape, order=0)
-    #     mbn_lbl = resize(mbn_lbl, C1.shape, order=0)
+    # # csv
+    # results = pd.DataFrame(results)   
+    # results_prf = pd.DataFrame(results_prf)   
+    # results.to_csv(out_path / "results.csv", index=False)
+    # results_prf.to_csv(out_path / "results_prf.csv", index=False)
+    
+    # # tif
+    # io.imsave(out_path / "lbl.tif", lbl, check_contrast=False)
+    # io.imsave(out_path / "cyt_lbl.tif", cyt_lbl, check_contrast=False)
+    # io.imsave(out_path / "mbn_lbl.tif", mbn_lbl, check_contrast=False)
+    # io.imsave(out_path / "all_lbl.tif", all_lbl, check_contrast=False)
+    
+    # if bsub:
+    #     io.imsave(out_path / "C1_bsub.tif", C1, check_contrast=False)
+    #     io.imsave(out_path / "C2_bsub.tif", C2, check_contrast=False)
     
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
@@ -1010,45 +1024,12 @@ if __name__ == "__main__":
     #     opacity=0.50,
     #     )
     # viewer.add_labels(
+    #     lbl, name="all_lbl", visible=0,
+    #     blending="additive", 
+    #     opacity=0.50,
+    #     )   
+    # viewer.add_labels(
     #     lbl, name="lbl", visible=0,
     #     blending="additive", 
     #     opacity=0.50,
     #     )   
-
-#%%
-
-    # def subtract_background(Cx, lbl, mbn_lbl, kernel_size=9):
-    #     msk = np.maximum(lbl, mbn_lbl) > 0
-    #     msk = np.max(msk, axis=0) == 0
-    #     bgrd = Cx.copy().astype(float)
-    #     bgrd *= msk
-    #     bgrd[bgrd == 0] = np.nan
-    #     bgrd = nan_filt(bgrd, kernel_size=kernel_size)
-    #     bgrd = nan_replace(bgrd, kernel_size=kernel_size)
-    #     bsub = Cx.copy().astype(float) - bgrd
-    #     return bsub
-    
-    # t0 = time.time()
-    # print("bgsub : ", end="", flush=False)
-    
-    # C1_rscale_bsub = subtract_background(
-    #     C1_rscale, lbl, mbn_lbl, kernel_size=9)
-    # C2_rscale_bsub = subtract_background(
-    #     C2_rscale, lbl, mbn_lbl, kernel_size=9)
-    
-    # t1 = time.time()
-    # print(f"{t1 - t0:.3f}s")
-
-    # # Display
-    # viewer = napari.Viewer()
-    # viewer.add_image(
-    #     C1_rscale_bsub, name="C1_bsub", visible=1,
-    #     colormap="gray", 
-    #     gamma=1.0, opacity=1.00,
-    #     )
-    # viewer.add_image(
-    #     C2_rscale_bsub, name="C2_bsub", visible=1,
-    #     colormap="gray", 
-    #     gamma=1.0, opacity=1.00,
-    #     )
-    
