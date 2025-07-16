@@ -53,7 +53,7 @@ procedure = {
     "extract" : 0,
     "predict" : 0,
     "process" : 0,
-    "analyse" : 1,
+    "analyse" : 0,
     "display" : 0,
     
     }
@@ -927,7 +927,7 @@ if __name__ == "__main__":
     # mbn_lbl = expand_labels(lbl, distance=max(3, mbn_width))
     # mbn_lbl[cyt_msk] = 0
     # mbn_lbl = mbn_lbl.astype("uint8")
-    # all_lbl = np.maximum(lbl, mbn_lbl)
+    # all_lbl = np.maximum(cyt_lbl, mbn_lbl)
         
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
@@ -1032,7 +1032,7 @@ if __name__ == "__main__":
     # t1 = time.time()
     # print(f"{t1 - t0:.3f}s")
     
-    # -------------------------------------------------------------------------
+    # # -------------------------------------------------------------------------
     
     # # Display
     # viewer = napari.Viewer()
@@ -1080,7 +1080,7 @@ if __name__ == "__main__":
     #     opacity=0.50,
     #     )
     # viewer.add_labels(
-    #     lbl, name="all_lbl", visible=0,
+    #     all_lbl, name="all_lbl", visible=0,
     #     blending="additive", 
     #     opacity=0.50,
     #     )   
