@@ -1190,4 +1190,3 @@ if __name__ == "__main__":
     #         ax.set_title(f"({channel}) {cond}_" + metric)
     #         ax.set_xticks([0, 25, 50, 75])
     #         ax.set_xlabel("dist. to synaptic plane (pix)")     
-
